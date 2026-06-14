@@ -25,11 +25,12 @@ Flags:
                     project chips can drill down beyond the rollup window.
 
 Path resolution:
-  Each PROJECTS entry is (label, dropbox_tail).  rollup.py probes
-  ~/Library/CloudStorage/Dropbox/<tail>/action_items.db and then
-  ~/Dropbox/<tail>/action_items.db, using whichever exists.  If neither
-  exists, a warning is printed to stderr and that project is skipped.
-  This allows graceful degradation on machines where some projects are
+  Each PROJECTS entry is (label, path_tail).  For a relative tail, rollup.py
+  probes <root>/<tail>/action_items.db across the roots returned by
+  _project_roots() (common cloud-sync mounts — Dropbox/Box/OneDrive/Drive — plus
+  $HOME), using whichever exists; set PROJECT_ROOTS in tracker_config.py to be
+  explicit.  If none exists, a warning is printed to stderr and that project is
+  skipped.  This allows graceful degradation on machines where some projects are
   not synced (e.g. tablet/Termux with selective bisync).
 
 Sentinel:
@@ -82,7 +83,7 @@ MD_OUT_PATH   = BASE / "MASTER_PRIORITIES.md"
 HTML_OUT_PATH = BASE / "dashboard.html"
 
 PROJECT_TITLE     = _c("PROJECT_TITLE", "Cross-Project Priorities")
-PROJECTS          = _c("PROJECTS", [])          # [(label, dropbox_tail), ...]
+PROJECTS          = _c("PROJECTS", [])          # [(label, path_tail), ...]
 ROLLUP_WINDOW_DAYS= _c("ROLLUP_WINDOW_DAYS", 60)
 XP_SENTINEL       = "[XP]"
 
@@ -101,16 +102,21 @@ def _project_roots():
 
     Override via PROJECT_ROOTS in tracker_config.py, e.g.:
         PROJECT_ROOTS = ["/home/user/work", "/mnt/shared"]
-    Defaults to macOS Dropbox locations (CloudStorage first, then symlink).
+    Defaults to the common cloud-sync mounts (Dropbox/Box/OneDrive/Drive) and
+    $HOME, existence-filtered, so a relative tail resolves out-of-the-box on
+    most setups; set PROJECT_ROOTS to be explicit.
     """
     custom = _c("PROJECT_ROOTS", None)
     if custom:
         return [Path(r).expanduser() for r in custom]
     home = Path.home()
-    return [
-        home / "Library" / "CloudStorage" / "Dropbox",
-        home / "Dropbox",
-    ]
+    roots = []
+    cloud = home / "Library" / "CloudStorage"      # macOS File Provider mounts
+    if cloud.is_dir():
+        roots += sorted(cloud.iterdir())            # Dropbox, Box-Box, OneDrive-*, GoogleDrive-*
+    roots += [home / "Dropbox", home / "Box", home / "OneDrive",
+              home / "Google Drive", home]
+    return [r for r in roots if r.exists()]
 
 
 def resolve_project_db(path_or_tail):
@@ -1424,10 +1430,15 @@ def main():
         for label, tail in PROJECTS:
             db_path = resolve_project_db(tail)
             if db_path is None:
-                print(f"WARNING: {label} DB not found at Dropbox/{tail}/action_items.db — skipping",
+                print(f"WARNING: {label}: no action_items.db for '{tail}' under PROJECT_ROOTS — skipping",
                       file=sys.stderr)
                 continue
-            all_open.extend(fetch_project_items_all(label, db_path, cutoff))
+            try:
+                all_open.extend(fetch_project_items_all(label, db_path, cutoff))
+            except sqlite3.Error as e:
+                print(f"WARNING: {label}: {db_path} unreadable ({e}) — skipping",
+                      file=sys.stderr)
+                continue
             n_projects += 1
 
         all_open.sort(key=_sort_key)
@@ -1448,10 +1459,15 @@ def main():
     for label, tail in PROJECTS:
         db_path = resolve_project_db(tail)
         if db_path is None:
-            print(f"WARNING: {label} DB not found at Dropbox/{tail}/action_items.db — skipping",
+            print(f"WARNING: {label}: no action_items.db for '{tail}' under PROJECT_ROOTS — skipping",
                   file=sys.stderr)
             continue
-        items = fetch_project_items(label, db_path, cutoff)
+        try:
+            items = fetch_project_items(label, db_path, cutoff)
+        except sqlite3.Error as e:
+            print(f"WARNING: {label}: {db_path} unreadable ({e}) — skipping",
+                  file=sys.stderr)
+            continue
         all_items.extend(items)
 
     all_items.sort(key=_sort_key)

@@ -202,7 +202,8 @@ CREATE INDEX IF NOT EXISTS idx_owner    ON items(is_owner);
 CREATE INDEX IF NOT EXISTS idx_deadline ON items(deadline);
 """
 
-# Columns added after the initial schema; used by migrate.py --ensure-columns.
+# Columns added after the initial schema (applied to pre-existing DBs by an
+# external migration step). New DBs from `init` already include them via _SCHEMA.
 _MIGRATIONS = [
     ("xp_tags", "TEXT"),
 ]
@@ -553,11 +554,12 @@ def _export(output_path):
     conn = open_db()
     cur  = conn.cursor()
 
-    # Guard against Dropbox-sync-interrupted writes leaving stale index entries:
-    # rebuild indexes before reading so a partially-synced DB can't drop rows
-    # from the exported Markdown.
-    cur.execute("REINDEX")
-    conn.commit()
+    # A partially-synced DB (any cloud sync — Dropbox, Box, iCloud, Drive, NFS)
+    # can leave index pages inconsistent with the table b-trees. quick_check is
+    # cheap on a healthy DB; only rebuild indexes if it reports a problem.
+    if cur.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        cur.execute("REINDEX")
+        conn.commit()
 
     today = date.today().isoformat()
     lines = [
@@ -714,7 +716,14 @@ def main():
         "archive": lambda a: cmd_done_archive(a, "ARCHIVED"),
         "export":  cmd_export,
     }
-    dispatch[args.cmd](args)
+    try:
+        dispatch[args.cmd](args)
+    except sqlite3.OperationalError as e:
+        sys.exit(f"action_items.db is busy/locked — another tracker write may be "
+                 f"in progress; retry in a moment. ({e})")
+    except sqlite3.DatabaseError as e:
+        sys.exit(f"action_items.db is corrupt or has a cloud-sync conflict ({e}). "
+                 f"Check for a 'conflicted copy' of the file next to it.")
 
 
 if __name__ == "__main__":

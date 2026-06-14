@@ -152,8 +152,7 @@ itty-bitty-project-tracker/   ← master tracker hub (this repo)
 │   ├── tracker_config.py     ← YOUR config (copy from example; gitignored)
 │   ├── todo.py               ← per-project CRUD engine
 │   ├── rollup.py             ← cross-project aggregator
-│   ├── serve.py              ← localhost server backing the + Add button
-│   └── migrate.py            ← one-time markdown→SQLite importer (bootstrap)
+│   └── serve.py              ← localhost server backing the + Add button
 ├── action_items.db           ← master SQLite DB (gitignored)
 ├── action_items.md           ← auto-generated markdown view (gitignored)
 ├── dashboard.html            ← auto-generated dashboard (gitignored)
@@ -186,7 +185,8 @@ PROJECTS = [
     ("ProjectB", "work/projectB"),            # relative path → resolved via PROJECT_ROOTS
 ]
 
-# Base directories for relative PROJECTS paths (defaults to Dropbox on macOS)
+# Base directories for relative PROJECTS paths (default: common cloud-sync
+# mounts — Dropbox/Box/OneDrive/Drive — plus $HOME; set this to be explicit)
 PROJECT_ROOTS = ["~/work"]
 
 ROLLUP_WINDOW_DAYS = 60    # surface items due within this many days
@@ -298,14 +298,6 @@ python3 scripts/rollup.py --window-days 30          # narrow the deadline window
 python3 scripts/rollup.py --json                    # dump to stdout as JSON
 ```
 
-### `migrate.py` (one-time importer)
-
-```bash
-python3 scripts/migrate.py --dry-run                # preview import from action_items.md
-python3 scripts/migrate.py                          # import markdown table → SQLite
-python3 scripts/migrate.py --ensure-columns         # idempotent: add missing schema columns
-```
-
 ---
 
 ## The `[XP]` tag and `xp_tags` field
@@ -381,8 +373,6 @@ CREATE TABLE items (
 );
 ```
 
-Add schema columns to an existing DB: `python3 scripts/migrate.py --ensure-columns`
-
 ---
 
 ## Portability notes
@@ -390,7 +380,7 @@ Add schema columns to an existing DB: `python3 scripts/migrate.py --ensure-colum
 - **macOS / Linux / Windows WSL:** all supported. `launch.sh` auto-detects the right `open`/`xdg-open`/`wslview` browser opener — no manual edits needed.
 - **Symlink resolution:** `launch.sh` uses Python's `os.path.realpath` (not `readlink -f`), so it works on stock macOS without `brew install coreutils`.
 - **Custom port:** set `TRACKER_PORT=NNNN` in your shell environment to run on a port other than 8765.
-- **Default paths:** if `PROJECT_ROOTS` is not set, rollup.py defaults to macOS Dropbox locations (`~/Library/CloudStorage/Dropbox` then `~/Dropbox`). Set `PROJECT_ROOTS` in `tracker_config.py` for any other layout.
+- **Default paths:** if `PROJECT_ROOTS` is not set, rollup.py searches the common cloud-sync mounts (the macOS `~/Library/CloudStorage/*` File Provider dirs — Dropbox, Box, OneDrive, Google Drive — plus `~/Dropbox`, `~/Box`, `~/OneDrive`, `~/Google Drive`) and finally `$HOME`. Set `PROJECT_ROOTS` in `tracker_config.py` to be explicit or for any other layout.
 - **PATH:** `~/.local/bin` is the recommended location for the `tracker` symlink. Ensure it is on your `$PATH` (add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` or `~/.bashrc` if needed).
 
 ---

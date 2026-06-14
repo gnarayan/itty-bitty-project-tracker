@@ -36,8 +36,10 @@ PROJECTS = [
 ]
 
 # PROJECT_ROOTS: base directories for resolving relative PROJECTS paths above.
-# Defaults to macOS Dropbox locations. Set this if your projects live elsewhere:
-#   PROJECT_ROOTS = ["~/work", "/mnt/shared/projects"]
+# Defaults to the common cloud-sync mounts (Dropbox/Box/OneDrive/Drive) and $HOME.
+# Set this if your projects live elsewhere, e.g.:
+#   PROJECT_ROOTS = ["~/work", "/mnt/shared/projects"]   # custom layout
+#   PROJECT_ROOTS = ["~/Library/CloudStorage/Box-Box"]   # Box on macOS
 # PROJECT_ROOTS = None
 
 # Surface project items due within this many days (or flagged [XP] in title).
