@@ -42,3 +42,28 @@ PROJECTS = [
 
 # Surface project items due within this many days (or flagged [XP] in title).
 ROLLUP_WINDOW_DAYS = 60
+
+# ── Status taxonomy (optional) ───────────────────────────────────────────────
+# All of the following have sensible defaults; uncomment to tailor them.
+# The dashboard's status filters are built dynamically from whatever tags exist
+# in the database, so any free-form `todo.py --tag VALUE` always shows up — these
+# settings only affect auto-extraction and which tags count as "closed".
+
+# STATUS_KEYWORDS: recognised when auto-deriving a tag from free-text status.
+# Keep "OPEN" (the fallback) and "DONE"/"ARCHIVED" (set by done/archive).
+# STATUS_KEYWORDS = [
+#     "IN PROGRESS", "BLOCKED", "ON HOLD", "QUEUED",
+#     "TODO", "ACTIVE", "OPEN", "DONE", "ARCHIVED", "CANCELLED",
+# ]
+
+# CLOSED_TAGS: tags treated as closed — hidden from active list/rollup views.
+# Keep this in sync with STATUS_KEYWORDS. todo.py and rollup.py both read it.
+# CLOSED_TAGS = frozenset(["DONE", "ARCHIVED", "CANCELLED"])
+
+# OWNER_TAG_VARIANTS: title substrings that flag a "personal owner" item (★).
+# Leave empty (default) to disable the --owner flag and the ★ marker.
+# OWNER_TAG_VARIANTS = ["[ME]", "[MINE]"]
+# OWNER_TAG_LABEL    = "Owner"     # shown in --help text
+
+# EMOJI_SET: leading status emoji recognised at the start of a status line.
+# EMOJI_SET = "✅🔴🟡⚠️🟢⏳"

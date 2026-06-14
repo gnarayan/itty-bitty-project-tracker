@@ -38,7 +38,7 @@ Sentinel:
   to force it into the rollup regardless of deadline.
 
   Cross-project tags (xp_tags column):
-    python3 scripts/todo.py update <id> --xp SkAI,DESC
+    python3 scripts/todo.py update <id> --xp ProjectA,ProjectB
   Tags an item as cross-project; it will surface in the rollup and appear
   under the tagged projects in the dashboard filter.
 """
@@ -86,9 +86,11 @@ PROJECTS          = _c("PROJECTS", [])          # [(label, dropbox_tail), ...]
 ROLLUP_WINDOW_DAYS= _c("ROLLUP_WINDOW_DAYS", 60)
 XP_SENTINEL       = "[XP]"
 
-CLOSED_TAGS = frozenset([
-    "DONE", "ARCHIVED", "SUPERSEDED", "STANDING", "SENT", "HELD", "DE-ESCALATED",
-])
+# Tags treated as "closed" — excluded from the rollup. Override CLOSED_TAGS in
+# tracker_config.py to match your own taxonomy (keep it in sync with todo.py).
+CLOSED_TAGS = frozenset(_c("CLOSED_TAGS", [
+    "DONE", "ARCHIVED", "CANCELLED",
+]))
 
 # ---------------------------------------------------------------------------
 # Path resolution

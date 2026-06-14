@@ -61,7 +61,7 @@ MD_PATH      = BASE / "action_items.md"
 ARCHIVE_PATH = BASE / "action_items_archive.md"
 
 # ---------------------------------------------------------------------------
-# Config-driven constants  (DESC values are the defaults)
+# Config-driven constants — override any of these in tracker_config.py
 # ---------------------------------------------------------------------------
 
 PROJECT_TITLE = _c("PROJECT_TITLE", "Project")
@@ -79,17 +79,23 @@ STANDING_SLUG = _c("STANDING_SLUG", "standing_watch")
 
 # OWNER_TAG_VARIANTS: list of substring patterns that flag a "personal owner" item.
 # Set to [] to disable the feature (no --owner flag, no ★ marker).
-OWNER_TAG_VARIANTS = _c("OWNER_TAG_VARIANTS", [])   # e.g. ["[SP]", "[SP/", "[SP +"]
+OWNER_TAG_VARIANTS = _c("OWNER_TAG_VARIANTS", [])   # e.g. ["[ME]", "[MINE]"]
 OWNER_TAG_LABEL    = _c("OWNER_TAG_LABEL",    "Owner")  # used in --help text
 
+# Status keywords recognised when auto-extracting a tag from free-text status.
+# These are only a default starting set — override STATUS_KEYWORDS in
+# tracker_config.py to match your own workflow. The dashboard's status filters
+# are built dynamically from whatever tags actually exist in the DB, so any
+# free-form `--tag` value still shows up regardless of this list. Keep "OPEN"
+# (the fallback tag) plus "DONE"/"ARCHIVED" (set by the done/archive commands).
 STATUS_KEYWORDS = _c("STATUS_KEYWORDS", [
-    "NEARLY DONE", "IN PROGRESS", "WINDING DOWN", "LOW PRIORITY",
-    "QUEUED", "MONITORING", "ACTIVE", "OPEN", "SENT", "DONE",
-    "ARCHIVED", "SUPERSEDED", "STANDING", "DE-ESCALATED", "HELD",
+    "IN PROGRESS", "BLOCKED", "ON HOLD", "QUEUED",
+    "TODO", "ACTIVE", "OPEN", "DONE", "ARCHIVED", "CANCELLED",
 ])
 
+# Tags treated as "closed" — hidden from active list/rollup views.
 CLOSED_TAGS = _c("CLOSED_TAGS", frozenset([
-    "DONE", "ARCHIVED", "SUPERSEDED", "STANDING", "SENT", "HELD", "DE-ESCALATED",
+    "DONE", "ARCHIVED", "CANCELLED",
 ]))
 
 STANDING_PREAMBLE = _c("STANDING_PREAMBLE",
@@ -645,7 +651,7 @@ def build_parser():
     pa.add_argument("--deadline",    metavar="YYYY-MM-DD", default=None)
     pa.add_argument("--tag",         metavar="TAG", default=None)
     pa.add_argument("--xp",          metavar="PROJ[,PROJ]", default=None,
-                    help="Comma-separated project labels this item is cross-tagged into (e.g. SkAI,DESC)")
+                    help="Comma-separated project labels this item is cross-tagged into (e.g. ProjectA,ProjectB)")
     pa.add_argument("--status",      metavar="TEXT", default=None)
     pa.add_argument("--status-file", metavar="FILE", default=None,
                     help="Read status text from file ('-' = stdin)")

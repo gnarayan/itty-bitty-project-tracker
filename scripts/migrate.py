@@ -17,10 +17,10 @@ COLUMN_MAP keys (0-indexed, after the leading | is stripped):
   "status"  — status text           (optional, default col 5)
   "tag"     — extra tag/label col   (optional; if present, prepended to title as [TAG])
 
-Example for DESC-style tables  (| # | Action | Owner(s) | Source date | Status |):
+Example: action-style tables  (| # | Action | Owner(s) | Source date | Status |):
   COLUMN_MAP = {"id": 0, "title": 1, "owner": 2, "source": 3, "status": 4}
 
-Example for Advising-style tables  (| # | Tag | Item | Source | Status |):
+Example: tagged tables  (| # | Tag | Item | Source | Status |):
   COLUMN_MAP = {"id": 0, "tag": 1, "title": 2, "source": 3, "status": 4}
 
 Set COLUMN_MAP in tracker_config.py before running this script.
@@ -54,9 +54,8 @@ def _is_owner(title):
 
 
 STATUS_KEYWORDS = getattr(_cfg, "STATUS_KEYWORDS", [
-    "NEARLY DONE", "IN PROGRESS", "WINDING DOWN", "LOW PRIORITY",
-    "QUEUED", "MONITORING", "ACTIVE", "OPEN", "SENT", "DONE",
-    "ARCHIVED", "SUPERSEDED", "STANDING", "DE-ESCALATED", "HELD",
+    "IN PROGRESS", "BLOCKED", "ON HOLD", "QUEUED",
+    "TODO", "ACTIVE", "OPEN", "DONE", "ARCHIVED", "CANCELLED",
 ])
 EMOJI_SET    = getattr(_cfg, "EMOJI_SET", "✅🔴🟡⚠️🟢⏳")
 # Pre-tokenized longest-first so ⚠️ (U+26A0 + U+FE0F) matches whole.
