@@ -1,0 +1,23 @@
+# Generated outputs — re-create with `python3 scripts/rollup.py [--html]`
+dashboard.html
+MASTER_PRIORITIES.md
+
+# Per-project live data — each project dir has its own
+action_items.db
+action_items.md
+action_items_archive.md
+
+# Python cache
+scripts/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Personal Claude config (local overrides, not portable)
+.claude/settings.local.json
+
+# Your personal tracker config — copy from tracker_config.example.py
+scripts/tracker_config.py
