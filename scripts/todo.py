@@ -553,6 +553,12 @@ def _export(output_path):
     conn = open_db()
     cur  = conn.cursor()
 
+    # Guard against Dropbox-sync-interrupted writes leaving stale index entries:
+    # rebuild indexes before reading so a partially-synced DB can't drop rows
+    # from the exported Markdown.
+    cur.execute("REINDEX")
+    conn.commit()
+
     today = date.today().isoformat()
     lines = [
         EXPORT_BANNER,
