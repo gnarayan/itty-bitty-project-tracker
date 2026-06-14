@@ -80,6 +80,12 @@ python3 scripts/rollup.py --html
 The dashboard supports inline editing and Done/Archive buttons when the server is running.
 Without the server, it is a static read-only view.
 
+`tracker up` runs the server detached (safe to close the terminal); it logs to a
+rotating file at `~/Library/Logs/tracker/serve.log` (macOS) or
+`${XDG_STATE_HOME:-~/.local/state}/tracker/serve.log` (Linux/WSL) rather than the
+terminal. Do not enable `tracker install` (launchd auto-start) on a directory
+synced across machines — concurrent servers risk corrupting `action_items.db`.
+
 ---
 
 ## Master hub vs. sub-project

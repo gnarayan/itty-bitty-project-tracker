@@ -103,9 +103,42 @@ tracker list
 tracker done 3
 ```
 
+`tracker up` runs the server **detached** (`nohup` + `disown`), so it keeps
+running after you close the terminal. It does not print to the terminal; all
+output goes to a rotating log:
+
+- **macOS:** `~/Library/Logs/tracker/serve.log`
+- **Linux / WSL:** `${XDG_STATE_HOME:-~/.local/state}/tracker/serve.log`
+
+The log rotates automatically and is capped at ~6 MB total (5 × 1 MB backups),
+so it never grows without bound. `tracker down` stops the server.
+
 > **macOS note:** `launch.sh` uses Python's `os.path.realpath` for symlink resolution
 > (not `readlink -f`, which is GNU-only and absent on stock macOS). No `brew install
 > coreutils` required. Set `TRACKER_PORT` env var to use a port other than 8765.
+
+### Optional: start at login / restart on crash (`tracker install`)
+
+On macOS you can register the server as a launchd **LaunchAgent** so it starts
+automatically at login and is restarted if it ever crashes:
+
+```bash
+tracker install     # generate + load ~/Library/LaunchAgents/com.ittybitty.tracker.plist
+tracker uninstall    # stop and remove the agent
+```
+
+`tracker install` resolves your actual `python3` (e.g. a conda/pyenv
+interpreter) and bakes its absolute path into the plist, since launchd runs with
+a minimal `PATH`. On Linux, `tracker install` prints `systemd --user` / cron
+`@reboot` pointers instead. On any platform, plain `tracker up` already
+backgrounds safely without installing anything.
+
+> **⚠️ Do not `tracker install` when this directory is synced across machines**
+> (Dropbox, iCloud Drive, Google Drive, etc.). A server auto-started on every
+> machine means **concurrent writers** to `action_items.db` and the Markdown
+> files — which produces "conflicted copy" files and risks database corruption.
+> For a multi-machine synced setup, skip `install` and just run `tracker up`
+> on whichever machine you are currently using.
 
 ---
 
@@ -219,9 +252,11 @@ After registering, run `python3 scripts/rollup.py --html` in the master hub to u
 ### `tracker` (the shell wrapper)
 
 ```
-tracker [up]                        Start server at http://127.0.0.1:8765, open browser
+tracker [up]                        Start server (detached; logs to a rotating file), open browser
 tracker down                        Stop the server
 tracker restart                     Bounce (down + up)
+tracker install                     macOS: start at login + restart on crash (launchd). See warning above.
+tracker uninstall                   macOS: stop and remove the launchd agent
 tracker add "title" [--section S]   Add a task (section defaults to first in SECTION_ORDER)
 tracker list [--section S] [--json] List open tasks
 tracker done <id>                   Mark task done and move to archive

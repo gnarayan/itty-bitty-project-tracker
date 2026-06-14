@@ -27,6 +27,9 @@ Security:
     cross-process contention (e.g. concurrent CLI edits or rollup reads).
 """
 import json
+import logging
+import logging.handlers
+import os
 import re
 import subprocess
 import sys
@@ -49,6 +52,33 @@ DEFAULT_PORT = 8765
 # Serialize all write operations: add, update, done/archive.
 # Prevents concurrent browser submissions from interleaving writes + regen.
 _WRITE_LOCK = threading.Lock()
+
+# Module logger. Configured by _setup_logging() in main(); until then it is a
+# no-op so importing this module (e.g. for tests) never emits stray output.
+log = logging.getLogger("tracker")
+
+
+def _setup_logging(log_file):
+    """Route server output to a rotating file, or to stdout when no file given.
+
+    With a log file: RotatingFileHandler caps total on-disk size at
+    maxBytes*(backupCount+1) (~6 MB here) so a long-running background server
+    never grows the log without bound. Without one: stdout, preserving the
+    interactive foreground behaviour.
+    """
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s",
+                            "%Y-%m-%d %H:%M:%S")
+    if log_file:
+        path = Path(log_file).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+    else:
+        handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
+    log.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +117,7 @@ def _regen(proj_dir, todo_py):
                        cwd=str(BASE), capture_output=True, text=True)
     if r.returncode != 0:
         msg = r.stderr.strip() or r.stdout.strip() or "unknown error"
-        print(f"[regen] rollup --html failed: {msg}", file=sys.stderr)
+        log.warning("[regen] rollup --html failed: %s", msg)
         return "dashboard regen failed; reload to retry"
     return None
 
@@ -265,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
     _PORT = DEFAULT_PORT   # overridden in main() with the actual --port value
 
     def log_message(self, fmt, *args):
-        print(f"  {self.address_string()}  {fmt % args}")
+        log.info("%s %s", self.address_string(), fmt % args)
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
@@ -358,12 +388,19 @@ def main():
                    help=f"Port to listen on (default: {DEFAULT_PORT})")
     p.add_argument("--no-browser", action="store_true",
                    help="Don't open the browser automatically")
+    p.add_argument("--log-file", default=None,
+                   help="Write logs to this file (rotating, ~6 MB cap) instead "
+                        "of stdout. Also honours the TRACKER_LOG_FILE env var.")
     args = p.parse_args()
 
+    log_file = args.log_file or os.environ.get("TRACKER_LOG_FILE")
+    _setup_logging(log_file)
+
     url = f"http://127.0.0.1:{args.port}"
-    print(f"Priorities dashboard  →  {url}")
-    print(f"Write endpoints       →  POST {url}/api/add | /api/update | /api/done")
-    print(f"Press Ctrl-C to stop.\n")
+    log.info("Priorities dashboard  ->  %s", url)
+    log.info("Write endpoints       ->  POST %s/api/add | /api/update | /api/done", url)
+    if not log_file:
+        log.info("Press Ctrl-C to stop.")
 
     if not args.no_browser:
         webbrowser.open(url)
@@ -373,7 +410,7 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nServer stopped.")
+        log.info("Server stopped.")
 
 
 if __name__ == "__main__":
