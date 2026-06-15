@@ -150,6 +150,70 @@ def _check_fingerprint(proj_dir, raw_id, base_fp):
 
 
 # ---------------------------------------------------------------------------
+# Regen-on-read helpers
+# ---------------------------------------------------------------------------
+
+def _source_db_paths():
+    """Return a list of existing source action_items.db Paths for staleness checks.
+
+    Includes the master hub DB and each registered project DB.
+    Stat-only — opens nothing.
+    """
+    paths = []
+    if rollup.DB_PATH.exists():
+        paths.append(rollup.DB_PATH)
+    for _label, path_tail in rollup.PROJECTS:
+        db = rollup.resolve_project_db(path_tail)
+        if db is not None:
+            paths.append(db)
+    return paths
+
+
+def _dashboard_is_stale():
+    """Return True if dashboard.html is missing or older than any source DB.
+
+    Uses strict > so equal mtimes (fresh render) are not considered stale.
+    Guards each stat() so a DB that vanishes mid-check does not raise.
+    """
+    if not HTML_PATH.exists():
+        return True
+    try:
+        html_mtime = HTML_PATH.stat().st_mtime
+    except OSError:
+        return True
+    db_mtimes = []
+    for db in _source_db_paths():
+        try:
+            db_mtimes.append(db.stat().st_mtime)
+        except OSError:
+            pass
+    if not db_mtimes:
+        return False
+    return max(db_mtimes) > html_mtime
+
+
+def _ensure_fresh():
+    """Regenerate dashboard.html if any source DB is newer than the rendered file.
+
+    Double-checked under _WRITE_LOCK so concurrent GETs and POSTs do not race.
+    Best-effort: on rollup failure the warning is logged; the caller falls through
+    to serve whatever dashboard.html exists (or returns 404 if absent).
+    """
+    if not _dashboard_is_stale():
+        return
+    with _WRITE_LOCK:
+        if not _dashboard_is_stale():   # another thread already regenerated
+            return
+        r = subprocess.run(
+            [sys.executable, str(ROLLUP_PY), "--html"],
+            cwd=str(BASE), capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            msg = r.stderr.strip() or r.stdout.strip() or "unknown error"
+            log.warning("[regen-on-read] rollup --html failed: %s", msg)
+
+
+# ---------------------------------------------------------------------------
 # Write endpoints
 # ---------------------------------------------------------------------------
 
@@ -314,6 +378,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path in ("/", "/dashboard.html"):
+            _ensure_fresh()
             try:
                 body = HTML_PATH.read_bytes()
             except FileNotFoundError:

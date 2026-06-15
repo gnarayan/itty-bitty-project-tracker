@@ -70,8 +70,11 @@ python3 scripts/todo.py done <id>
 ## Dashboard
 
 When the server is running (`tracker up` or `python3 scripts/serve.py`), the dashboard at
-`http://127.0.0.1:8765` auto-regenerates after each API write. After a CLI write, refresh
-manually:
+`http://127.0.0.1:8765` auto-regenerates on the next page load after any write — whether
+via the API or the CLI. No manual rollup needed when using the served dashboard.
+
+If viewing `dashboard.html` **directly off disk** (without the server), CLI writes do not
+auto-refresh it; run:
 
 ```bash
 python3 scripts/rollup.py --html

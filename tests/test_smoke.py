@@ -6,7 +6,9 @@ Usage:
   python3 tests/test_smoke.py
 """
 import concurrent.futures
+import contextlib
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -15,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
@@ -309,6 +312,79 @@ class TestServe(_ProjectFixture):
             server.terminate()
             server.wait(timeout=5)
             server.stdout.close()
+
+
+class TestRegenOnRead(_ProjectFixture):
+    """Unit tests for the regen-on-read staleness helpers in serve.py."""
+
+    def _make_hub(self):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        for f in ("todo.py", "rollup.py", "serve.py"):
+            shutil.copy(str(SCRIPTS / f), str(hub_scripts / f))
+        (hub_scripts / "tracker_config.py").write_text(
+            'PROJECT_TITLE = "Hub"\n'
+            'SECTION_ORDER = [("active", "Active")]\n'
+            'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}")]\n'
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"],
+                       cwd=str(hub), capture_output=True)
+        return hub, hub_scripts
+
+    def test_stale_detection_and_regen(self):
+        """_dashboard_is_stale() detects a newer DB; _ensure_fresh() rebuilds."""
+        hub, hub_scripts = self._make_hub()
+        self._init()  # sub-project DB
+
+        # Build the initial dashboard.html
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dashboard = hub / "dashboard.html"
+        self.assertTrue(dashboard.exists())
+
+        import serve
+        import rollup as rollup_mod
+
+        hub_db    = hub / "action_items.db"
+        proj_db   = self.proj / "action_items.db"
+        rollup_py = hub_scripts / "rollup.py"
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                unittest.mock.patch.object(serve, "HTML_PATH", dashboard))
+            stack.enter_context(
+                unittest.mock.patch.object(serve, "BASE", hub))
+            stack.enter_context(
+                unittest.mock.patch.object(serve, "ROLLUP_PY", rollup_py))
+            stack.enter_context(
+                unittest.mock.patch.object(rollup_mod, "DB_PATH", hub_db))
+            stack.enter_context(
+                unittest.mock.patch.object(rollup_mod, "PROJECTS",
+                                           [("proj", str(self.proj))]))
+
+            # 1. Fresh render → not stale
+            self.assertFalse(serve._dashboard_is_stale(),
+                             "dashboard should not be stale right after rollup")
+
+            # 2. Backdate dashboard.html (2 s ago) and set DB mtime to 1 s ago
+            # so DB is newer than dashboard but both are in the past —
+            # avoids relying on the system clock advancing past an artificial future mtime.
+            now = time.time()
+            os.utime(dashboard, (now - 2.0, now - 2.0))
+            os.utime(proj_db,   (now - 1.0, now - 1.0))
+            self.assertTrue(serve._dashboard_is_stale(),
+                            "dashboard should be stale when DB is newer")
+
+            # 3. _ensure_fresh() rebuilds; not stale anymore
+            serve._ensure_fresh()
+            self.assertFalse(serve._dashboard_is_stale(),
+                             "dashboard should not be stale after _ensure_fresh()")
+            self.assertTrue(dashboard.exists(), "dashboard.html must exist after regen")
 
 
 if __name__ == "__main__":
