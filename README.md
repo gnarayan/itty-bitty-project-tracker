@@ -276,14 +276,31 @@ python3 scripts/todo.py add \
     --title "Write the proposal intro" \
     --deadline 2026-07-01 \
     --xp "ProjectB,ProjectC"                        # force into rollup with cross-project tags
-python3 scripts/todo.py list                        # all open items
+python3 scripts/todo.py add \
+    --section active \
+    --title "Monthly report" \
+    --deadline 2026-07-01 \
+    --recur monthly \
+    --priority H                                    # recurring + high-priority
+python3 scripts/todo.py add \
+    --title "Deploy" \
+    --depends 3,7 \
+    --snooze 2026-08-01                             # blocked + snoozed
+python3 scripts/todo.py list                        # open items (snoozed hidden by default)
 python3 scripts/todo.py list --section active       # filter by section
 python3 scripts/todo.py list --due-before 2026-08-01
+python3 scripts/todo.py list --search "report"     # substring search (title/status/notes)
+python3 scripts/todo.py list --snoozed             # only currently-snoozed items
+python3 scripts/todo.py list --all                 # includes snoozed
 python3 scripts/todo.py show <id>                   # full record
 python3 scripts/todo.py update <id> --deadline 2026-07-15
+python3 scripts/todo.py update <id> --priority M   # set priority (H/M/L; "" to clear)
+python3 scripts/todo.py update <id> --snooze 2026-09-01  # snooze; "" to clear; --wait is alias
+python3 scripts/todo.py update <id> --recur 2w     # Nd/Nw/Nm/Ny or daily/weekly/monthly/yearly
+python3 scripts/todo.py update <id> --depends 5,9  # prerequisite IDs; "" to clear
 python3 scripts/todo.py append <id> "Status note"  # dated note appended to status_detail
-python3 scripts/todo.py done <id>                   # mark done, move to archive
-python3 scripts/todo.py archive <id>                # mark archived
+python3 scripts/todo.py done <id>                   # mark done; recurring items respawn next occurrence
+python3 scripts/todo.py archive <id>                # mark archived (recurring items do NOT respawn)
 python3 scripts/todo.py export                      # regenerate action_items.md from DB
 ```
 
@@ -316,6 +333,26 @@ python3 scripts/todo.py update <id> --xp "ProjectA"
 ```
 
 Items with `xp_tags` appear in the dashboard's project filter for those labels and always surface in the rollup.
+
+---
+
+## Priority, snooze, recurrence, and dependencies
+
+### Priority (`--priority H|M|L`)
+
+Attach a priority level when adding or updating any item. Priority sorts after deadline (deadline takes precedence), and `[H]`/`[M]`/`[L]` badges appear in `list` output. High-priority items also surface in the hub rollup even when they have no near deadline. Clear with `--priority ""`.
+
+### Snooze / wait-until (`--snooze YYYY-MM-DD` / `--wait YYYY-MM-DD`)
+
+Hides an item from the default `list` view until the given date — useful for tasks you cannot act on until a future event. Snoozed items are suppressed from the hub rollup regardless of deadline or priority. Use `list --snoozed` to see only currently-snoozed items; `list --all` includes them in the normal view. `--wait` is an exact alias for `--snooze`. Clear with `--snooze ""`.
+
+### Recurring deadlines (`--recur RULE`)
+
+Attaches a recurrence rule to a task with a deadline. Accepted forms: `daily`, `weekly`, `monthly`, `yearly`, or `Nd`/`Nw`/`Nm`/`Ny` (e.g. `2w`, `3m`). When you mark a recurring item **done**, it respawns as a new open item with the next occurrence date (month-end dates are clamped to the last day of the target month). `archive` does **not** respawn — use it to permanently retire a recurring task. `--recur` requires `--deadline` and exits non-zero without one. Clear with `--recur ""`.
+
+### Task dependencies (`--depends ID[,ID]`)
+
+Records prerequisite item IDs (comma-separated). This is **informational** — it does not block writes or prevent completion. Unmet dependencies show as a `🔒 blocked by: #X` badge in `list` output; the badge disappears automatically once the prerequisite item is closed (deleted from the DB). Clear with `--depends ""`.
 
 ---
 
@@ -369,9 +406,16 @@ CREATE TABLE items (
     is_owner     INTEGER DEFAULT 0,
     is_standing  INTEGER DEFAULT 0,
     status_detail TEXT,         -- free-text; dated notes appended here
-    xp_tags      TEXT           -- comma-separated cross-project labels
+    xp_tags      TEXT,          -- comma-separated cross-project labels
+    priority     TEXT,          -- H / M / L or NULL
+    wait_until   TEXT,          -- ISO YYYY-MM-DD; snooze hide-until date
+    recur        TEXT,          -- recurrence rule (e.g. weekly, 2w, monthly)
+    depends_on   TEXT           -- comma-separated prerequisite item IDs
 );
 ```
+
+Existing `action_items.db` files are **upgraded automatically**: `open_db()` runs
+`ALTER TABLE … ADD COLUMN` for any column that is absent — no manual migration step needed.
 
 ---
 
