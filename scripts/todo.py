@@ -8,19 +8,22 @@ Subcommands:
   list    [--all] [--owner] [--section S] [--status TAG] [--due-before DATE]
           [--standing] [--limit N] [--json]
   show    <id>
-  add     --section S --title "..." [--owner ...] [--deadline ...] [--status "..."|--status-file FILE]
-  update  <id> [--title ...] [--owner ...] [--deadline ...] [--tag ...] [--status "..."|--status-file -]
+  add     --section S --title "..." [--owner ...] [--deadline ...] [--recur RULE] [--depends ID[,ID]]
+          [--status "..."|--status-file FILE]
+  update  <id> [--title ...] [--owner ...] [--deadline ...] [--tag ...] [--recur RULE] [--depends ID[,ID]]
+          [--status "..."|--status-file -]
   append  <id> [--text "..."|--text-file -]
   done    <id>
   archive <id>
   export  [--output FILE]   (default: action_items.md next to action_items.db)
 """
 import argparse
+import calendar
 import json
 import re
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # Pin stdin/stdout/stderr to UTF-8 regardless of the system locale.
@@ -149,6 +152,65 @@ def extract_deadline(text):
     return None
 
 
+_RECUR_KEYWORDS = {
+    'daily': ('d', 1), 'weekly': ('w', 1), 'monthly': ('m', 1), 'yearly': ('y', 1),
+}
+
+
+def parse_recur(rule):
+    """Parse a recurrence rule into (unit, n) or raise ValueError.
+
+    Accepted: daily/weekly/monthly/yearly  or  Nd/Nw/Nm/Ny (every N units).
+    Returns ('d'|'w'|'m'|'y', int).
+    """
+    if not rule:
+        raise ValueError("empty recurrence rule")
+    r = rule.strip().lower()
+    if r in _RECUR_KEYWORDS:
+        return _RECUR_KEYWORDS[r]
+    m = re.match(r'^(\d+)([dwmy])$', r)
+    if m:
+        return (m.group(2), int(m.group(1)))
+    raise ValueError(
+        f"unrecognised recurrence rule {rule!r}; "
+        "use: daily/weekly/monthly/yearly  or  Nd/Nw/Nm/Ny"
+    )
+
+
+def _advance_one(dt, unit, n):
+    """Advance dt by one recurrence interval."""
+    if unit == 'd':
+        return dt + timedelta(days=n)
+    elif unit == 'w':
+        return dt + timedelta(weeks=n)
+    elif unit == 'm':
+        month = dt.month + n
+        year  = dt.year + (month - 1) // 12
+        month = (month - 1) % 12 + 1
+        day   = min(dt.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+    else:  # 'y'
+        year = dt.year + n
+        day  = min(dt.day, calendar.monthrange(year, dt.month)[1])
+        return date(year, dt.month, day)
+
+
+def next_deadline(base_iso, rule, today_iso):
+    """Return the next occurrence date strictly after today_iso.
+
+    Always advances at least one interval from base_iso so early completion
+    (marking done before the deadline) produces the next occurrence rather than
+    echoing the same deadline.  Month-end clamping: Jan 31 + monthly → Feb 28.
+    """
+    unit, n = parse_recur(rule)
+    dt    = date.fromisoformat(base_iso)
+    today = date.fromisoformat(today_iso)
+    dt = _advance_one(dt, unit, n)   # always advance at least once
+    while dt <= today:
+        dt = _advance_one(dt, unit, n)
+    return dt.isoformat()
+
+
 def extract_emoji(text, tokens=None):
     if tokens is None:
         tokens = EMOJI_TOKENS
@@ -194,7 +256,9 @@ CREATE TABLE IF NOT EXISTS items (
     is_owner      INTEGER DEFAULT 0,
     is_standing   INTEGER DEFAULT 0,
     status_detail TEXT,
-    xp_tags       TEXT
+    xp_tags       TEXT,
+    recur         TEXT,
+    depends_on    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_status   ON items(status_tag);
 CREATE INDEX IF NOT EXISTS idx_section  ON items(section);
@@ -202,10 +266,12 @@ CREATE INDEX IF NOT EXISTS idx_owner    ON items(is_owner);
 CREATE INDEX IF NOT EXISTS idx_deadline ON items(deadline);
 """
 
-# Columns added after the initial schema (applied to pre-existing DBs by an
-# external migration step). New DBs from `init` already include them via _SCHEMA.
+# Columns added after the initial schema.  open_db() applies these automatically
+# to pre-existing DBs so users don't need to migrate manually.
 _MIGRATIONS = [
-    ("xp_tags", "TEXT"),
+    ("xp_tags",    "TEXT"),
+    ("recur",      "TEXT"),
+    ("depends_on", "TEXT"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -219,6 +285,15 @@ def open_db():
     conn.row_factory = sqlite3.Row
     # Wait up to 5 s if another writer (server, concurrent CLI) holds the lock.
     conn.execute("PRAGMA busy_timeout=5000")
+    # Apply any column additions that postdate the original CREATE TABLE so
+    # existing DBs upgrade in place without manual migration steps.
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(items)")
+    existing = {row[1] for row in cur.fetchall()}
+    for col, col_type in _MIGRATIONS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE items ADD COLUMN {col} {col_type}")
+    conn.commit()
     return conn
 
 
@@ -301,7 +376,8 @@ def cmd_list(args):
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = f"""
-        SELECT raw_id, title, owner, deadline, status_emoji, status_tag, is_owner, section
+        SELECT raw_id, title, owner, deadline, status_emoji, status_tag, is_owner, section,
+               depends_on, recur
         FROM items
         {where}
         ORDER BY
@@ -313,10 +389,21 @@ def cmd_list(args):
     params.append(args.limit)
     cur.execute(sql, params)
     rows = cur.fetchall()
+
+    # Compute blocked_by: a dependency raw_id is still active if its row exists.
+    # (Closed items are deleted, so presence in items == active.)
+    cur.execute("SELECT raw_id FROM items")
+    active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
 
     if args.json:
-        print(json.dumps([dict(r) for r in rows], indent=2))
+        out = []
+        for r in rows:
+            d = dict(r)
+            dep_ids = [x.strip() for x in (d.get('depends_on') or '').split(',') if x.strip()]
+            d['blocked_by'] = [x for x in dep_ids if x in active_ids]
+            out.append(d)
+        print(json.dumps(out, indent=2))
         return
 
     if not rows:
@@ -332,7 +419,11 @@ def cmd_list(args):
         deadline    = r['deadline'] or '—'
         tag         = (r['status_emoji'] or '') + (r['status_tag'] or '')
         marker      = "★" if (r['is_owner'] and OWNER_TAG_VARIANTS) else " "
-        print(f"{marker}{r['raw_id']:<5} {title_short:<55} {owner_short:<20} {deadline:<11} {tag}")
+        recur_str   = f"  🔁 {r['recur']}" if r['recur'] else ""
+        dep_ids     = [x.strip() for x in (r['depends_on'] or '').split(',') if x.strip()]
+        blocked_by  = [x for x in dep_ids if x in active_ids]
+        blocked_str = ("  🔒 blocked by: " + ", ".join(f"#{x}" for x in blocked_by)) if blocked_by else ""
+        print(f"{marker}{r['raw_id']:<5} {title_short:<55} {owner_short:<20} {deadline:<11} {tag}{recur_str}{blocked_str}")
 
     print(f"\n({len(rows)} items shown)")
 
@@ -378,6 +469,17 @@ def cmd_add(args):
     is_standing = 1 if args.section == STANDING_SLUG else 0
     today       = date.today().isoformat()
 
+    recur_val   = getattr(args, 'recur',   None) or None
+    depends_val = getattr(args, 'depends', None) or None
+
+    if recur_val:
+        try:
+            parse_recur(recur_val)
+        except ValueError as e:
+            sys.exit(str(e))
+        if not deadline:
+            sys.exit("--recur requires a deadline (use --deadline YYYY-MM-DD)")
+
     conn = open_db()
     cur  = conn.cursor()
     # Acquire write lock before computing new ID so no concurrent CLI add
@@ -393,11 +495,13 @@ def cmd_add(args):
     cur.execute("""
         INSERT INTO items
         (raw_id, sort_id, section, title, owner, source_date, deadline,
-         status_tag, status_emoji, is_owner, is_standing, status_detail, xp_tags)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         status_tag, status_emoji, is_owner, is_standing, status_detail,
+         xp_tags, recur, depends_on)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (new_id, new_sort, args.section, args.title,
           args.owner or "", today, deadline,
-          tag, emoji, owner_flag, is_standing, status_text, xp_tags))
+          tag, emoji, owner_flag, is_standing, status_text,
+          xp_tags, recur_val, depends_val))
     conn.commit()
     conn.close()
     print(f"Added item #{new_id} in section '{args.section}'")
@@ -445,6 +549,24 @@ def cmd_update(args):
     xp_val = getattr(args, 'xp', None)
     if xp_val is not None:
         updates['xp_tags'] = xp_val if xp_val else None
+
+    recur_val = getattr(args, 'recur', None)
+    if recur_val is not None:
+        if recur_val:
+            try:
+                parse_recur(recur_val)
+            except ValueError as e:
+                conn.close()
+                sys.exit(str(e))
+            new_deadline = updates.get('deadline') or row['deadline']
+            if not new_deadline:
+                conn.close()
+                sys.exit("--recur requires a deadline (use --deadline to set one)")
+        updates['recur'] = recur_val or None
+
+    depends_val = getattr(args, 'depends', None)
+    if depends_val is not None:
+        updates['depends_on'] = depends_val or None
 
     if not updates:
         conn.close()
@@ -514,6 +636,12 @@ def cmd_done_archive(args, final_tag):
     if not status_text.upper().startswith(final_tag):
         status_text = f"**{final_tag} {today}** — {status_text}"
 
+    # Capture fields needed for possible respawn before the row is deleted.
+    row_recur      = row['recur']     if 'recur'      in row.keys() else None
+    row_deadline   = row['deadline']
+    row_depends_on = row['depends_on'] if 'depends_on' in row.keys() else None
+    row_xp_tags    = row['xp_tags']   if 'xp_tags'    in row.keys() else None
+
     archive_row = (
         f"| {row['raw_id']} | {row['title']} | {row['owner'] or ''} "
         f"| {row['source_date'] or ''} | {status_text} |"
@@ -535,6 +663,31 @@ def cmd_done_archive(args, final_tag):
 
     _export(MD_PATH)
     print(f"Regenerated {MD_PATH.name}")
+
+    # Respawn only on DONE (not archive/cancel); requires a recur rule and a deadline.
+    if final_tag == "DONE" and row_recur and row_deadline:
+        new_deadline = next_deadline(row_deadline, row_recur, today)
+        conn2 = open_db()
+        cur2  = conn2.cursor()
+        conn2.execute("BEGIN IMMEDIATE")
+        cur2.execute("SELECT MAX(sort_id) FROM items")
+        max_sort = cur2.fetchone()[0] or 0
+        new_sort = max_sort + 1
+        new_id   = str(new_sort)
+        cur2.execute("""
+            INSERT INTO items
+            (raw_id, sort_id, section, title, owner, source_date, deadline,
+             status_tag, status_emoji, is_owner, is_standing, status_detail,
+             xp_tags, recur, depends_on)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (new_id, new_sort,
+              row['section'], row['title'], row['owner'] or '',
+              today, new_deadline,
+              'OPEN', '', row['is_owner'], row['is_standing'], 'OPEN',
+              row_xp_tags, row_recur, row_depends_on))
+        conn2.commit()
+        conn2.close()
+        print(f"Recurring: next occurrence is #{new_id} (deadline {new_deadline})")
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +813,10 @@ def build_parser():
     pa.add_argument("--tag",         metavar="TAG", default=None)
     pa.add_argument("--xp",          metavar="PROJ[,PROJ]", default=None,
                     help="Comma-separated project labels this item is cross-tagged into (e.g. ProjectA,ProjectB)")
+    pa.add_argument("--recur",       metavar="RULE", default=None,
+                    help="Recurrence rule: daily/weekly/monthly/yearly or Nd/Nw/Nm/Ny (requires --deadline)")
+    pa.add_argument("--depends",     metavar="ID[,ID]", default=None,
+                    help="Comma-separated IDs of prerequisite items (informational; shown as 🔒 until met)")
     pa.add_argument("--status",      metavar="TEXT", default=None)
     pa.add_argument("--status-file", metavar="FILE", default=None,
                     help="Read status text from file ('-' = stdin)")
@@ -673,6 +830,10 @@ def build_parser():
     pu.add_argument("--tag",         metavar="TAG", default=None)
     pu.add_argument("--xp",          metavar="PROJ[,PROJ]", default=None,
                     help="Set cross-project tags (comma-separated, empty string to clear)")
+    pu.add_argument("--recur",       metavar="RULE", default=None,
+                    help="Set recurrence rule (empty string to clear)")
+    pu.add_argument("--depends",     metavar="ID[,ID]", default=None,
+                    help="Set prerequisite IDs (comma-separated, empty string to clear)")
     pu.add_argument("--section",     metavar="SLUG", default=None)
     pu.add_argument("--status",      metavar="TEXT", default=None)
     pu.add_argument("--status-file", metavar="FILE", default=None,

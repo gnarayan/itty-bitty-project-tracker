@@ -134,7 +134,7 @@ def _check_fingerprint(proj_dir, raw_id, base_fp):
     conn = rollup.open_ro(db_path)
     cur  = conn.cursor()
     cur.execute(
-        "SELECT title, owner, deadline, section, status_tag, status_detail, xp_tags "
+        "SELECT title, owner, deadline, section, status_tag, status_detail, xp_tags, recur, depends_on "
         "FROM items WHERE raw_id = ?",
         (raw_id,)
     )
@@ -214,6 +214,26 @@ def _ensure_fresh():
 
 
 # ---------------------------------------------------------------------------
+# Input validators
+# ---------------------------------------------------------------------------
+
+_RECUR_KEYWORDS = frozenset({'daily', 'weekly', 'monthly', 'yearly'})
+
+
+def _validate_recur(rule):
+    """Return an error string if rule is not a recognised recurrence pattern, else None."""
+    if not rule:
+        return None
+    r = rule.strip().lower()
+    if r in _RECUR_KEYWORDS:
+        return None
+    if re.match(r'^\d+[dwmy]$', r):
+        return None
+    return (f"invalid recurrence rule {rule!r}; "
+            "use: daily/weekly/monthly/yearly  or  Nd/Nw/Nm/Ny")
+
+
+# ---------------------------------------------------------------------------
 # Write endpoints
 # ---------------------------------------------------------------------------
 
@@ -222,15 +242,24 @@ def _validate_and_add(payload):
 
     Returns (http_status: int, result: dict).
     """
-    project  = (payload.get("project")  or "").strip()
-    section  = (payload.get("section")  or "").strip()
-    title    = (payload.get("title")    or "").strip()
-    owner    = (payload.get("owner")    or "").strip() or None
-    deadline = (payload.get("deadline") or "").strip() or None
-    xp_tags  = (payload.get("xp_tags")  or "").strip() or None
+    project    = (payload.get("project")    or "").strip()
+    section    = (payload.get("section")    or "").strip()
+    title      = (payload.get("title")      or "").strip()
+    owner      = (payload.get("owner")      or "").strip() or None
+    deadline   = (payload.get("deadline")   or "").strip() or None
+    xp_tags    = (payload.get("xp_tags")    or "").strip() or None
+    recur      = (payload.get("recur")      or "").strip() or None
+    depends_on = (payload.get("depends_on") or "").strip() or None
 
     if not title:
         return 400, {"ok": False, "error": "title is required"}
+
+    if recur:
+        err = _validate_recur(recur)
+        if err:
+            return 400, {"ok": False, "error": err}
+        if not deadline:
+            return 400, {"ok": False, "error": "--recur requires a deadline"}
 
     proj_dir, todo_py, err = _resolve_project(project)
     if err:
@@ -245,9 +274,11 @@ def _validate_and_add(payload):
 
     cmd = [sys.executable, str(todo_py), "add",
            "--section", section, "--title", title]
-    if owner:    cmd += ["--owner",    owner]
-    if deadline: cmd += ["--deadline", deadline]
-    if xp_tags:  cmd += ["--xp",      xp_tags]
+    if owner:      cmd += ["--owner",    owner]
+    if deadline:   cmd += ["--deadline", deadline]
+    if xp_tags:    cmd += ["--xp",      xp_tags]
+    if recur:      cmd += ["--recur",   recur]
+    if depends_on: cmd += ["--depends", depends_on]
 
     with _WRITE_LOCK:
         r = subprocess.run(cmd, cwd=str(proj_dir), capture_output=True, text=True)
@@ -278,11 +309,18 @@ def _validate_and_update(payload):
     deadline   = payload.get("deadline")    # may be None to clear
     status_tag = (payload.get("status_tag") or "").strip().upper() or None
     xp_tags    = payload.get("xp_tags")     # may be None to clear
+    recur      = payload.get("recur")       # may be None to clear
+    depends_on = payload.get("depends_on")  # may be None to clear
 
     if not raw_id:
         return 400, {"ok": False, "error": "id is required"}
     if title is not None and not title:
         return 400, {"ok": False, "error": "title cannot be empty"}
+
+    if recur:
+        err = _validate_recur(recur)
+        if err:
+            return 400, {"ok": False, "error": err}
 
     proj_dir, todo_py, err = _resolve_project(project)
     if err:
@@ -300,6 +338,8 @@ def _validate_and_update(payload):
         if section    is not None: cmd += ["--section",  section]
         if status_tag is not None: cmd += ["--tag",      status_tag]
         if xp_tags    is not None: cmd += ["--xp",       xp_tags]
+        if recur      is not None: cmd += ["--recur",    recur    or ""]
+        if depends_on is not None: cmd += ["--depends",  depends_on or ""]
 
         r = subprocess.run(cmd, cwd=str(proj_dir), capture_output=True, text=True)
         if r.returncode != 0:

@@ -387,5 +387,217 @@ class TestRegenOnRead(_ProjectFixture):
             self.assertTrue(dashboard.exists(), "dashboard.html must exist after regen")
 
 
+class TestRecurrence(_ProjectFixture):
+    """Tests for --recur flag and respawn-on-done behaviour."""
+
+    def test_recur_add_succeeds(self):
+        self._init()
+        soon = (date.today() + timedelta(days=5)).isoformat()
+        r = self._run("add", "--section", "active",
+                      "--title", "Monthly standup",
+                      "--deadline", soon, "--recur", "monthly")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("#1", r.stdout)
+
+    def test_recur_without_deadline_fails_cleanly(self):
+        self._init()
+        r = self._run("add", "--section", "active",
+                      "--title", "No deadline", "--recur", "monthly")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("deadline", r.stderr)
+
+    def test_invalid_recur_rule_fails_cleanly(self):
+        self._init()
+        soon = (date.today() + timedelta(days=5)).isoformat()
+        r = self._run("add", "--section", "active",
+                      "--title", "Bad rule",
+                      "--deadline", soon, "--recur", "biweekly")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_done_respawns_next_occurrence(self):
+        self._init()
+        # Use a past deadline so next_deadline must advance past today.
+        past = (date.today() - timedelta(days=5)).isoformat()
+        self._run("add", "--section", "active",
+                  "--title", "Monthly mtg", "--deadline", past, "--recur", "monthly")
+        r = self._run("done", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Recurring", r.stdout)
+
+        r2 = self._run("list")
+        self.assertIn("Monthly mtg", r2.stdout)
+        # Old occurrence should not appear
+        r3 = self._run("list", "--json")
+        items = json.loads(r3.stdout)
+        self.assertEqual(len(items), 1)
+        new_deadline = items[0]["deadline"]
+        self.assertGreater(new_deadline, date.today().isoformat())
+
+    def test_archive_does_not_respawn(self):
+        self._init()
+        soon = (date.today() + timedelta(days=5)).isoformat()
+        self._run("add", "--section", "active",
+                  "--title", "Recurring task", "--deadline", soon, "--recur", "weekly")
+        r = self._run("archive", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r2 = self._run("list", "--json")
+        items = json.loads(r2.stdout)
+        self.assertEqual(items, [], "archive of a recurring item must not respawn")
+
+    def test_next_deadline_month_end_clamp(self):
+        """Jan 31 + monthly → Feb 28/29 (never Feb 31)."""
+        from todo import next_deadline
+        result = next_deadline("2026-01-31", "monthly", "2026-01-31")
+        self.assertEqual(result, "2026-02-28")
+
+    def test_next_deadline_early_completion(self):
+        """Completing before the deadline must still advance to the *next* occurrence."""
+        from todo import next_deadline
+        future = (date.today() + timedelta(days=10)).isoformat()
+        result = next_deadline(future, "monthly", date.today().isoformat())
+        # Must be strictly past the original deadline, not equal to it
+        self.assertGreater(result, future)
+
+    def test_next_deadline_advances_past_today(self):
+        """Late completion: must advance until strictly after today, not just one step."""
+        from todo import next_deadline
+        # Deadline 3 months in the past with monthly recurrence — must jump past today.
+        past = (date.today() - timedelta(days=95)).isoformat()
+        result = next_deadline(past, "monthly", date.today().isoformat())
+        self.assertGreater(result, date.today().isoformat())
+
+    def test_done_early_respawns_next_occurrence(self):
+        """Marking a recurring item done before its deadline respawns with the NEXT deadline."""
+        self._init()
+        future = (date.today() + timedelta(days=10)).isoformat()
+        self._run("add", "--section", "active",
+                  "--title", "Future meeting", "--deadline", future, "--recur", "monthly")
+        self._run("done", "1")
+        r = self._run("list", "--json")
+        items = json.loads(r.stdout)
+        self.assertEqual(len(items), 1)
+        new_deadline = items[0]["deadline"]
+        # New deadline must be strictly after the original future deadline
+        self.assertGreater(new_deadline, future)
+
+    def test_parse_recur_keywords(self):
+        from todo import parse_recur
+        self.assertEqual(parse_recur("monthly"), ('m', 1))
+        self.assertEqual(parse_recur("weekly"),  ('w', 1))
+        self.assertEqual(parse_recur("daily"),   ('d', 1))
+        self.assertEqual(parse_recur("yearly"),  ('y', 1))
+
+    def test_parse_recur_n_form(self):
+        from todo import parse_recur
+        self.assertEqual(parse_recur("2w"), ('w', 2))
+        self.assertEqual(parse_recur("3m"), ('m', 3))
+        self.assertEqual(parse_recur("14d"), ('d', 14))
+
+    def test_parse_recur_invalid(self):
+        from todo import parse_recur
+        with self.assertRaises(ValueError):
+            parse_recur("biweekly")
+        with self.assertRaises(ValueError):
+            parse_recur("")
+
+
+class TestDependencies(_ProjectFixture):
+    """Tests for --depends flag and blocked_by display."""
+
+    def test_depends_add_succeeds(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Task A")
+        r = self._run("add", "--section", "active", "--title", "Task B",
+                      "--depends", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("#2", r.stdout)
+
+    def test_blocked_shown_in_list(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Task A")
+        self._run("add", "--section", "active", "--title", "Task B", "--depends", "1")
+        r = self._run("list")
+        self.assertIn("blocked by", r.stdout)
+        self.assertIn("#1", r.stdout)
+
+    def test_unblocked_after_prerequisite_done(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Prereq")
+        self._run("add", "--section", "active", "--title", "Downstream", "--depends", "1")
+        self._run("done", "1")
+        r = self._run("list")
+        self.assertNotIn("blocked by", r.stdout)
+
+    def test_blocked_in_json_output(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "A")
+        self._run("add", "--section", "active", "--title", "B", "--depends", "1")
+        r = self._run("list", "--json")
+        items = json.loads(r.stdout)
+        b = next(i for i in items if i["title"] == "B")
+        self.assertIn("blocked_by", b)
+        self.assertIn("1", b["blocked_by"])
+
+    def test_rollup_html_shows_blocked_badge(self):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        shutil.copy(str(SCRIPTS / "todo.py"),   str(hub_scripts / "todo.py"))
+        shutil.copy(str(SCRIPTS / "rollup.py"), str(hub_scripts / "rollup.py"))
+        (hub_scripts / "tracker_config.py").write_text(
+            f'PROJECT_TITLE = "Hub"\n'
+            f'SECTION_ORDER = [("active", "Active")]\n'
+            f'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}")]\n'
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"],
+                       cwd=str(hub), capture_output=True)
+        self._init()
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        self._run("add", "--section", "active", "--title", "Prereq task", "--deadline", soon)
+        self._run("add", "--section", "active", "--title", "[XP] Blocked task",
+                  "--deadline", soon, "--depends", "1")
+
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        self.assertIn("blocked-badge", html)
+        self.assertIn("Blocked task", html)
+
+    def test_rollup_html_shows_recur_badge(self):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        shutil.copy(str(SCRIPTS / "todo.py"),   str(hub_scripts / "todo.py"))
+        shutil.copy(str(SCRIPTS / "rollup.py"), str(hub_scripts / "rollup.py"))
+        (hub_scripts / "tracker_config.py").write_text(
+            f'PROJECT_TITLE = "Hub"\n'
+            f'SECTION_ORDER = [("active", "Active")]\n'
+            f'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}")]\n'
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"],
+                       cwd=str(hub), capture_output=True)
+        self._init()
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        self._run("add", "--section", "active",
+                  "--title", "[XP] Recurring meeting",
+                  "--deadline", soon, "--recur", "monthly")
+
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        self.assertIn("recur-badge", html)
+        self.assertIn("Recurring meeting", html)
+
+
 if __name__ == "__main__":
     unittest.main()

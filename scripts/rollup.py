@@ -166,6 +166,8 @@ def item_fingerprint(d):
         d.get("status_tag")    or "",
         d.get("status_detail") or "",
         d.get("xp_tags")       or "",
+        d.get("recur")         or "",
+        d.get("depends_on")    or "",
     )
     raw = "\x00".join(parts).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
@@ -192,15 +194,23 @@ def fetch_master_items(cutoff_date_str):
     conn = open_ro(DB_PATH)
     cur  = conn.cursor()
     closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
-    has_xp = _has_column(conn, "items", "xp_tags")
-    xp_col = ", xp_tags" if has_xp else ""
+    has_xp     = _has_column(conn, "items", "xp_tags")
+    has_recur  = _has_column(conn, "items", "recur")
+    has_deps   = _has_column(conn, "items", "depends_on")
+    xp_col     = ", xp_tags"    if has_xp    else ""
+    recur_col  = ", recur"      if has_recur  else ""
+    deps_col   = ", depends_on" if has_deps   else ""
     cur.execute(f"""
-        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail, is_standing{xp_col}
+        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
+               is_standing{xp_col}{recur_col}{deps_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
     """)
     rows = cur.fetchall()
+    # Active IDs for blocked_by derivation (any row present = not closed)
+    cur.execute("SELECT raw_id FROM items")
+    active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
     result = []
     for r in rows:
@@ -208,6 +218,8 @@ def fetch_master_items(cutoff_date_str):
         d["_project"] = "Master"
         d["_db"] = str(DB_PATH)
         d["_xp_tags"] = _parse_xp_tags(d.pop("xp_tags", None))
+        dep_ids = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
+        d["blocked_by"] = [x for x in dep_ids if x in active_ids]
         result.append(d)
     return result
 
@@ -217,11 +229,16 @@ def fetch_project_items(label, db_path, cutoff_date_str):
     conn = open_ro(db_path)
     cur  = conn.cursor()
     closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
-    has_xp = _has_column(conn, "items", "xp_tags")
-    xp_col = ", xp_tags" if has_xp else ""
-    xp_cond = "OR (xp_tags IS NOT NULL AND xp_tags != '')" if has_xp else ""
+    has_xp    = _has_column(conn, "items", "xp_tags")
+    has_recur = _has_column(conn, "items", "recur")
+    has_deps  = _has_column(conn, "items", "depends_on")
+    xp_col    = ", xp_tags"    if has_xp    else ""
+    recur_col = ", recur"      if has_recur  else ""
+    deps_col  = ", depends_on" if has_deps   else ""
+    xp_cond   = "OR (xp_tags IS NOT NULL AND xp_tags != '')" if has_xp else ""
     cur.execute(f"""
-        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail, is_standing{xp_col}
+        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
+               is_standing{xp_col}{recur_col}{deps_col}
         FROM items
         WHERE status_tag NOT IN ({closed})
           AND is_standing = 0
@@ -233,6 +250,8 @@ def fetch_project_items(label, db_path, cutoff_date_str):
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
     """, (cutoff_date_str,))
     rows = cur.fetchall()
+    cur.execute("SELECT raw_id FROM items")
+    active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
     result = []
     for r in rows:
@@ -240,6 +259,8 @@ def fetch_project_items(label, db_path, cutoff_date_str):
         d["_project"] = label
         d["_db"] = str(db_path)
         d["_xp_tags"] = _parse_xp_tags(d.pop("xp_tags", None))
+        dep_ids = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
+        d["blocked_by"] = [x for x in dep_ids if x in active_ids]
         result.append(d)
     return result
 
@@ -249,15 +270,22 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
     conn = open_ro(db_path)
     cur  = conn.cursor()
     closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
-    has_xp = _has_column(conn, "items", "xp_tags")
-    xp_col = ", xp_tags" if has_xp else ""
+    has_xp    = _has_column(conn, "items", "xp_tags")
+    has_recur = _has_column(conn, "items", "recur")
+    has_deps  = _has_column(conn, "items", "depends_on")
+    xp_col    = ", xp_tags"    if has_xp    else ""
+    recur_col = ", recur"      if has_recur  else ""
+    deps_col  = ", depends_on" if has_deps   else ""
     cur.execute(f"""
-        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail, is_standing{xp_col}
+        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
+               is_standing{xp_col}{recur_col}{deps_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
     """)
     rows = cur.fetchall()
+    cur.execute("SELECT raw_id FROM items")
+    active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
     result = []
     for r in rows:
@@ -265,14 +293,16 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
         title    = d.get("title", "") or ""
         deadline = d.get("deadline") or ""
         xp_tags  = _parse_xp_tags(d.pop("xp_tags", None))
-        d["_xp_tags"]  = xp_tags
-        d["_surfaced"] = (
+        dep_ids  = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
+        d["_xp_tags"]   = xp_tags
+        d["blocked_by"] = [x for x in dep_ids if x in active_ids]
+        d["_surfaced"]  = (
             (XP_SENTINEL in title) or
             bool(deadline and deadline <= cutoff_date_str) or
             bool(xp_tags)
         )
-        d["_project"]  = label
-        d["_db"]       = str(db_path)
+        d["_project"]   = label
+        d["_db"]        = str(db_path)
         result.append(d)
     return result
 
@@ -503,6 +533,18 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       border: 1px solid #c7e0f4; white-space: nowrap;
     }
     [data-theme="dark"] .xp-badge { background: #1a3652; color: #64b5f6; border-color: #1e4976; }
+    .recur-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 8px; margin-left: 4px;
+      font-size: 10px; font-weight: 600; background: #e8f5e8; color: #2e7d32;
+      border: 1px solid #b8d8b8; white-space: nowrap;
+    }
+    [data-theme="dark"] .recur-badge { background: #1a3021; color: #81c784; border-color: #2e5437; }
+    .blocked-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 8px; margin-left: 4px;
+      font-size: 10px; font-weight: 600; background: #fde8e8; color: #c62828;
+      border: 1px solid #f5b8b8; white-space: nowrap;
+    }
+    [data-theme="dark"] .blocked-badge { background: #3d1a1a; color: #ef9a9a; border-color: #6d2222; }
     .status-tag { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
     .title-text { font-weight: 500; }
     .expand-icon {
@@ -647,6 +689,14 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       <label>Cross-project tags</label>
       <input type="text" id="add-xp" placeholder="e.g. ProjectA,ProjectB (optional)">
     </div>
+    <div class="form-row">
+      <label>Recurrence</label>
+      <input type="text" id="add-recur" placeholder="e.g. monthly, weekly, 2w (optional; requires deadline)">
+    </div>
+    <div class="form-row">
+      <label>Depends on</label>
+      <input type="text" id="add-depends" placeholder="e.g. 8,12 — item IDs that must close first (optional)">
+    </div>
     <div class="form-actions">
       <button class="btn-cancel" id="add-cancel">Cancel</button>
       <button class="btn-primary" id="add-submit">Add Task</button>
@@ -690,6 +740,14 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <div class="form-row">
       <label>Cross-project tags</label>
       <input type="text" id="edit-xp" placeholder="e.g. ProjectA,ProjectB (optional)">
+    </div>
+    <div class="form-row">
+      <label>Recurrence</label>
+      <input type="text" id="edit-recur" placeholder="e.g. monthly, weekly, 2w (blank to clear)">
+    </div>
+    <div class="form-row">
+      <label>Depends on</label>
+      <input type="text" id="edit-depends" placeholder="e.g. 8,12 (blank to clear)">
     </div>
     <div class="form-actions" style="flex-wrap:wrap;gap:6px">
       <button class="btn-cancel" id="edit-cancel">Cancel</button>
@@ -815,6 +873,7 @@ __PROJECTS_META_JSON__
         case 'surfaced': vOk = !!item._surfaced; break;
         case 'overdue':  vOk = !!(item.deadline && item.deadline < TODAY); break;
         case 'due-soon': vOk = dlClass(item.deadline) === 'due-soon'; break;
+        case 'blocked':  vOk = !!(item.blocked_by && item.blocked_by.length); break;
         default:         vOk = true;
       }
       if (!vOk) return false;
@@ -884,7 +943,7 @@ __PROJECTS_META_JSON__
   var toolbar = document.getElementById('toolbar');
 
   // View tabs
-  var VIEW_DEFS = [{id:'surfaced',label:'Surfaced'},{id:'overdue',label:'Overdue'},{id:'due-soon',label:'Due Soon'},{id:'all',label:'All'}];
+  var VIEW_DEFS = [{id:'surfaced',label:'Surfaced'},{id:'overdue',label:'Overdue'},{id:'due-soon',label:'Due Soon'},{id:'blocked',label:'Blocked'},{id:'all',label:'All'}];
   VIEW_DEFS.forEach(function(f) {
     var btn = document.createElement('button');
     btn.className = 'filter-btn'; btn.setAttribute('data-view', f.id);
@@ -974,7 +1033,7 @@ __PROJECTS_META_JSON__
     toolbar.querySelectorAll('[data-view]').forEach(function(btn) {
       var vid = btn.getAttribute('data-view');
       var cnt = getFiltered(undefined, undefined, vid).length;
-      var labels = {surfaced:'Surfaced',overdue:'Overdue','due-soon':'Due Soon',all:'All'};
+      var labels = {surfaced:'Surfaced',overdue:'Overdue','due-soon':'Due Soon',blocked:'Blocked',all:'All'};
       btn.innerHTML = esc(labels[vid]||vid) + ' <span class="count-badge">(' + cnt + ')</span>';
       btn.classList.toggle('active', state.view === vid);
     });
@@ -1027,12 +1086,24 @@ __PROJECTS_META_JSON__
           item._xp_tags.forEach(function(xp) { xpHtml += '<span class="xp-badge">↗ ' + esc(xp) + '</span>'; });
         }
 
+        var recurHtml = '';
+        if (item.recur) {
+          recurHtml = '<span class="recur-badge" title="Recurs: ' + esc(item.recur) + '">&#x1F501; ' + esc(item.recur) + '</span>';
+        }
+
+        var blockedHtml = '';
+        if (item.blocked_by && item.blocked_by.length) {
+          var blkIds = item.blocked_by.map(function(id) { return '#' + esc(id); }).join(', ');
+          blockedHtml = '<span class="blocked-badge" title="Blocked by: ' + blkIds + '">&#x1F512; ' + blkIds + '</span>';
+        }
+
         var tr = document.createElement('tr');
         tr.className = 'item-row' + (dc ? ' '+dc : '') + (hasDetail ? ' clickable' : '');
         tr.innerHTML =
           '<td class="deadline-cell">' + esc(dl) + '</td>' +
           '<td><span class="proj-badge">' + esc(item._project) + '</span>' + xpHtml + '</td>' +
           '<td class="title-cell"><span class="title-text">' + esc(item.title||'') + '</span>' +
+            recurHtml + blockedHtml +
             (hasDetail ? '<span class="expand-icon">&#9660;</span>' : '') +
             '<span class="edit-btn" title="Edit task">✎</span>' + '</td>' +
           '<td><span class="status-tag">' + esc(item.status_tag||'') + '</span></td>' +
@@ -1101,6 +1172,8 @@ __PROJECTS_META_JSON__
     document.getElementById('add-owner').value = '';
     document.getElementById('add-deadline').value = '';
     document.getElementById('add-xp').value = '';
+    document.getElementById('add-recur').value = '';
+    document.getElementById('add-depends').value = '';
     addResult.textContent = ''; addResult.className = 'add-result';
     addCmdWrap.style.display = 'none';
   }
@@ -1128,9 +1201,11 @@ __PROJECTS_META_JSON__
     cmd += 'python3 scripts/todo.py add';
     cmd += ' --section ' + payload.section;
     cmd += ' --title ' + JSON.stringify(payload.title);
-    if (payload.owner)    cmd += ' --owner '    + JSON.stringify(payload.owner);
-    if (payload.deadline) cmd += ' --deadline ' + payload.deadline;
-    if (payload.xp_tags)  cmd += ' --xp '       + JSON.stringify(payload.xp_tags);
+    if (payload.owner)      cmd += ' --owner '   + JSON.stringify(payload.owner);
+    if (payload.deadline)   cmd += ' --deadline ' + payload.deadline;
+    if (payload.xp_tags)    cmd += ' --xp '       + JSON.stringify(payload.xp_tags);
+    if (payload.recur)      cmd += ' --recur '    + JSON.stringify(payload.recur);
+    if (payload.depends_on) cmd += ' --depends '  + JSON.stringify(payload.depends_on);
     return cmd;
   }
 
@@ -1144,9 +1219,11 @@ __PROJECTS_META_JSON__
       project:  addProjectSel.value,
       section:  addSectionSel.value,
       title:    title,
-      owner:    document.getElementById('add-owner').value.trim() || null,
-      deadline: document.getElementById('add-deadline').value || null,
-      xp_tags:  document.getElementById('add-xp').value.trim() || null,
+      owner:      document.getElementById('add-owner').value.trim() || null,
+      deadline:   document.getElementById('add-deadline').value || null,
+      xp_tags:    document.getElementById('add-xp').value.trim() || null,
+      recur:      document.getElementById('add-recur').value.trim() || null,
+      depends_on: document.getElementById('add-depends').value.trim() || null,
     };
 
     addCmdWrap.style.display = 'none';
@@ -1208,6 +1285,8 @@ __PROJECTS_META_JSON__
     document.getElementById('edit-deadline').value   = item.deadline || '';
     document.getElementById('edit-status-tag').value = item.status_tag || '';
     document.getElementById('edit-xp').value         = (item._xp_tags||[]).join(',');
+    document.getElementById('edit-recur').value      = item.recur    || '';
+    document.getElementById('edit-depends').value    = item.depends_on || '';
     editResult.textContent = ''; editResult.className = 'add-result';
     editCmdWrap.style.display = 'none';
 
@@ -1242,12 +1321,14 @@ __PROJECTS_META_JSON__
     var dir = meta ? meta.dir : '.';
     var prefix = (payload.project !== 'Master') ? 'cd ' + dir + ' && ' : '';
     var cmd = prefix + 'python3 scripts/todo.py update ' + payload.id;
-    if (payload.title    !== undefined) cmd += ' --title '    + JSON.stringify(payload.title);
-    if (payload.owner    !== undefined) cmd += ' --owner '    + JSON.stringify(payload.owner);
-    if (payload.deadline !== undefined) cmd += ' --deadline ' + payload.deadline;
-    if (payload.section  !== undefined) cmd += ' --section '  + payload.section;
-    if (payload.status_tag !== undefined) cmd += ' --tag '    + payload.status_tag;
-    if (payload.xp_tags  !== undefined) cmd += ' --xp '      + JSON.stringify(payload.xp_tags);
+    if (payload.title      !== undefined) cmd += ' --title '   + JSON.stringify(payload.title);
+    if (payload.owner      !== undefined) cmd += ' --owner '   + JSON.stringify(payload.owner);
+    if (payload.deadline   !== undefined) cmd += ' --deadline ' + payload.deadline;
+    if (payload.section    !== undefined) cmd += ' --section '  + payload.section;
+    if (payload.status_tag !== undefined) cmd += ' --tag '     + payload.status_tag;
+    if (payload.xp_tags    !== undefined) cmd += ' --xp '      + JSON.stringify(payload.xp_tags);
+    if (payload.recur      !== undefined) cmd += ' --recur '   + JSON.stringify(payload.recur || '');
+    if (payload.depends_on !== undefined) cmd += ' --depends ' + JSON.stringify(payload.depends_on || '');
     return cmd;
   }
 
@@ -1281,6 +1362,8 @@ __PROJECTS_META_JSON__
       deadline:   document.getElementById('edit-deadline').value || null,
       status_tag: document.getElementById('edit-status-tag').value.trim() || null,
       xp_tags:    document.getElementById('edit-xp').value.trim() || null,
+      recur:      document.getElementById('edit-recur').value.trim() || null,
+      depends_on: document.getElementById('edit-depends').value.trim() || null,
     };
 
     var endpoint = '/api/update';
