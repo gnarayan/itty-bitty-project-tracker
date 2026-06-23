@@ -599,5 +599,197 @@ class TestDependencies(_ProjectFixture):
         self.assertIn("Recurring meeting", html)
 
 
+class TestPriority(_ProjectFixture):
+    """Tests for --priority flag."""
+
+    def test_priority_add_succeeds(self):
+        self._init()
+        r = self._run("add", "--section", "active", "--title", "Urgent task", "--priority", "H")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("#1", r.stdout)
+
+    def test_invalid_priority_fails_cleanly(self):
+        self._init()
+        r = self._run("add", "--section", "active", "--title", "Bad priority", "--priority", "X")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("H, M, or L", r.stderr)
+
+    def test_priority_in_json_output(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "HP task", "--priority", "H")
+        self._run("add", "--section", "active", "--title", "LP task", "--priority", "L")
+        r = self._run("list", "--json")
+        items = json.loads(r.stdout)
+        hp = next(i for i in items if i["title"] == "HP task")
+        lp = next(i for i in items if i["title"] == "LP task")
+        self.assertEqual(hp["priority"], "H")
+        self.assertEqual(lp["priority"], "L")
+
+    def test_priority_sort_order(self):
+        """H must appear before L in list output when both have no deadline."""
+        self._init()
+        self._run("add", "--section", "active", "--title", "Low prio task",  "--priority", "L")
+        self._run("add", "--section", "active", "--title", "High prio task", "--priority", "H")
+        r = self._run("list")
+        self.assertIn("High prio task", r.stdout)
+        self.assertIn("Low prio task",  r.stdout)
+        self.assertLess(r.stdout.index("High prio task"), r.stdout.index("Low prio task"))
+
+    def test_priority_badge_in_list(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Marked H", "--priority", "H")
+        r = self._run("list")
+        self.assertIn("[H]", r.stdout)
+
+    def test_priority_cleared_by_update(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Task", "--priority", "H")
+        self._run("update", "1", "--priority", "")
+        r = self._run("list")
+        self.assertNotIn("[H]", r.stdout)
+
+    def test_rollup_html_shows_priority_badge(self):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        shutil.copy(str(SCRIPTS / "todo.py"),   str(hub_scripts / "todo.py"))
+        shutil.copy(str(SCRIPTS / "rollup.py"), str(hub_scripts / "rollup.py"))
+        (hub_scripts / "tracker_config.py").write_text(
+            f'PROJECT_TITLE = "Hub"\n'
+            f'SECTION_ORDER = [("active", "Active")]\n'
+            f'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}")]\n'
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"],
+                       cwd=str(hub), capture_output=True)
+        self._init()
+        # High-priority item with no near deadline — should surface
+        far_future = (date.today() + timedelta(days=365)).isoformat()
+        self._run("add", "--section", "active",
+                  "--title", "[XP] High pri no deadline", "--priority", "H")
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        self.assertIn("pri-badge", html)
+        self.assertIn("High pri no deadline", html)
+
+
+class TestSnooze(_ProjectFixture):
+    """Tests for --snooze / --wait flag."""
+
+    def test_snooze_hides_from_default_list(self):
+        self._init()
+        future = (date.today() + timedelta(days=10)).isoformat()
+        self._run("add", "--section", "active", "--title", "Hidden task", "--snooze", future)
+        r = self._run("list")
+        self.assertNotIn("Hidden task", r.stdout)
+
+    def test_snoozed_flag_shows_hidden(self):
+        self._init()
+        future = (date.today() + timedelta(days=10)).isoformat()
+        self._run("add", "--section", "active", "--title", "Snoozed task", "--snooze", future)
+        r = self._run("list", "--snoozed")
+        self.assertIn("Snoozed task", r.stdout)
+
+    def test_past_snooze_date_is_visible(self):
+        self._init()
+        past = (date.today() - timedelta(days=3)).isoformat()
+        self._run("add", "--section", "active", "--title", "Past snooze", "--snooze", past)
+        r = self._run("list")
+        self.assertIn("Past snooze", r.stdout)
+
+    def test_invalid_snooze_fails_cleanly(self):
+        self._init()
+        r = self._run("add", "--section", "active", "--title", "Bad snooze", "--snooze", "not-a-date")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_clearing_snooze_restores_visibility(self):
+        self._init()
+        future = (date.today() + timedelta(days=10)).isoformat()
+        self._run("add", "--section", "active", "--title", "Will show again", "--snooze", future)
+        r1 = self._run("list")
+        self.assertNotIn("Will show again", r1.stdout)
+        self._run("update", "1", "--snooze", "")
+        r2 = self._run("list")
+        self.assertIn("Will show again", r2.stdout)
+
+    def test_all_flag_shows_snoozed(self):
+        self._init()
+        future = (date.today() + timedelta(days=10)).isoformat()
+        self._run("add", "--section", "active", "--title", "All-visible", "--snooze", future)
+        r = self._run("list", "--all")
+        self.assertIn("All-visible", r.stdout)
+
+    def test_rollup_snoozed_does_not_surface(self):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        shutil.copy(str(SCRIPTS / "todo.py"),   str(hub_scripts / "todo.py"))
+        shutil.copy(str(SCRIPTS / "rollup.py"), str(hub_scripts / "rollup.py"))
+        (hub_scripts / "tracker_config.py").write_text(
+            f'PROJECT_TITLE = "Hub"\n'
+            f'SECTION_ORDER = [("active", "Active")]\n'
+            f'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}")]\n'
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"],
+                       cwd=str(hub), capture_output=True)
+        self._init()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        future_snooze = (date.today() + timedelta(days=10)).isoformat()
+        # Due soon but snoozed — must NOT surface
+        self._run("add", "--section", "active",
+                  "--title", "[XP] Snoozed item",
+                  "--deadline", tomorrow, "--snooze", future_snooze)
+
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        # Item may appear in the 'all' set but must not be marked _surfaced
+        self.assertIn("Snoozed item", html)  # present in data
+        self.assertIn("snooze-badge", html)   # badge rendered
+
+
+class TestSearch(_ProjectFixture):
+    """Tests for list --search flag."""
+
+    def test_search_matches_title(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "findme please")
+        self._run("add", "--section", "active", "--title", "unrelated item")
+        r = self._run("list", "--search", "findme")
+        self.assertIn("findme please", r.stdout)
+        self.assertNotIn("unrelated item", r.stdout)
+
+    def test_search_no_match(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "something")
+        r = self._run("list", "--search", "zzznomatch")
+        self.assertIn("(no items)", r.stdout)
+
+    def test_search_case_insensitive(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "CaseSensitive Test")
+        r = self._run("list", "--search", "casesensitive")
+        self.assertIn("CaseSensitive Test", r.stdout)
+
+    def test_search_json(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "alpha task")
+        self._run("add", "--section", "active", "--title", "beta task")
+        r = self._run("list", "--json", "--search", "alpha")
+        items = json.loads(r.stdout)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "alpha task")
+
+
 if __name__ == "__main__":
     unittest.main()

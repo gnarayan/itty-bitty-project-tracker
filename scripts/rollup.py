@@ -168,6 +168,8 @@ def item_fingerprint(d):
         d.get("xp_tags")       or "",
         d.get("recur")         or "",
         d.get("depends_on")    or "",
+        d.get("priority")      or "",
+        d.get("wait_until")    or "",
     )
     raw = "\x00".join(parts).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
@@ -197,12 +199,16 @@ def fetch_master_items(cutoff_date_str):
     has_xp     = _has_column(conn, "items", "xp_tags")
     has_recur  = _has_column(conn, "items", "recur")
     has_deps   = _has_column(conn, "items", "depends_on")
+    has_pri    = _has_column(conn, "items", "priority")
+    has_wait   = _has_column(conn, "items", "wait_until")
     xp_col     = ", xp_tags"    if has_xp    else ""
     recur_col  = ", recur"      if has_recur  else ""
     deps_col   = ", depends_on" if has_deps   else ""
+    pri_col    = ", priority"   if has_pri    else ""
+    wait_col   = ", wait_until" if has_wait   else ""
     cur.execute(f"""
         SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
-               is_standing{xp_col}{recur_col}{deps_col}
+               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
@@ -232,13 +238,18 @@ def fetch_project_items(label, db_path, cutoff_date_str):
     has_xp    = _has_column(conn, "items", "xp_tags")
     has_recur = _has_column(conn, "items", "recur")
     has_deps  = _has_column(conn, "items", "depends_on")
+    has_pri   = _has_column(conn, "items", "priority")
+    has_wait  = _has_column(conn, "items", "wait_until")
     xp_col    = ", xp_tags"    if has_xp    else ""
     recur_col = ", recur"      if has_recur  else ""
     deps_col  = ", depends_on" if has_deps   else ""
+    pri_col   = ", priority"   if has_pri    else ""
+    wait_col  = ", wait_until" if has_wait   else ""
     xp_cond   = "OR (xp_tags IS NOT NULL AND xp_tags != '')" if has_xp else ""
+    pri_cond  = "OR (priority = 'H')" if has_pri else ""
     cur.execute(f"""
         SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
-               is_standing{xp_col}{recur_col}{deps_col}
+               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}
         FROM items
         WHERE status_tag NOT IN ({closed})
           AND is_standing = 0
@@ -246,6 +257,7 @@ def fetch_project_items(label, db_path, cutoff_date_str):
             title LIKE '%[XP]%'
             OR (deadline IS NOT NULL AND deadline <= ?)
             {xp_cond}
+            {pri_cond}
           )
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
     """, (cutoff_date_str,))
@@ -253,9 +265,13 @@ def fetch_project_items(label, db_path, cutoff_date_str):
     cur.execute("SELECT raw_id FROM items")
     active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
+    today_iso = date.today().isoformat()
     result = []
     for r in rows:
         d = dict(r)
+        # Snoozed items are suppressed even if otherwise surfaced
+        if d.get("wait_until") and d["wait_until"] > today_iso:
+            continue
         d["_project"] = label
         d["_db"] = str(db_path)
         d["_xp_tags"] = _parse_xp_tags(d.pop("xp_tags", None))
@@ -273,12 +289,16 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
     has_xp    = _has_column(conn, "items", "xp_tags")
     has_recur = _has_column(conn, "items", "recur")
     has_deps  = _has_column(conn, "items", "depends_on")
+    has_pri   = _has_column(conn, "items", "priority")
+    has_wait  = _has_column(conn, "items", "wait_until")
     xp_col    = ", xp_tags"    if has_xp    else ""
     recur_col = ", recur"      if has_recur  else ""
     deps_col  = ", depends_on" if has_deps   else ""
+    pri_col   = ", priority"   if has_pri    else ""
+    wait_col  = ", wait_until" if has_wait   else ""
     cur.execute(f"""
         SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
-               is_standing{xp_col}{recur_col}{deps_col}
+               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
@@ -287,19 +307,25 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
     cur.execute("SELECT raw_id FROM items")
     active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
+    today_iso = date.today().isoformat()
     result = []
     for r in rows:
         d = dict(r)
         title    = d.get("title", "") or ""
         deadline = d.get("deadline") or ""
+        priority = d.get("priority") or ""
+        wait     = d.get("wait_until") or ""
         xp_tags  = _parse_xp_tags(d.pop("xp_tags", None))
         dep_ids  = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
         d["_xp_tags"]   = xp_tags
         d["blocked_by"] = [x for x in dep_ids if x in active_ids]
-        d["_surfaced"]  = (
+        # Snoozed items are never surfaced regardless of other criteria
+        snoozed = bool(wait and wait > today_iso)
+        d["_surfaced"]  = (not snoozed) and (
             (XP_SENTINEL in title) or
             bool(deadline and deadline <= cutoff_date_str) or
-            bool(xp_tags)
+            bool(xp_tags) or
+            priority == 'H'
         )
         d["_project"]   = label
         d["_db"]        = str(db_path)
@@ -545,6 +571,22 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       border: 1px solid #f5b8b8; white-space: nowrap;
     }
     [data-theme="dark"] .blocked-badge { background: #3d1a1a; color: #ef9a9a; border-color: #6d2222; }
+    .pri-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 8px; margin-left: 4px;
+      font-size: 10px; font-weight: 700; white-space: nowrap; border: 1px solid;
+    }
+    .pri-H { background: #fff0f0; color: #c62828; border-color: #f5b8b8; }
+    .pri-M { background: #fff8e8; color: #b45309; border-color: #f5d898; }
+    .pri-L { background: #f2f2f2; color: #555;    border-color: #d8d8d8; }
+    [data-theme="dark"] .pri-H { background: #3d1a1a; color: #ef9a9a; border-color: #6d2222; }
+    [data-theme="dark"] .pri-M { background: #3d2e10; color: #f6c468; border-color: #6d4f18; }
+    [data-theme="dark"] .pri-L { background: #2a2a2a; color: #aaa;    border-color: #444; }
+    .snooze-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 8px; margin-left: 4px;
+      font-size: 10px; font-weight: 600; background: #f0f0ff; color: #5551cf;
+      border: 1px solid #c8c6f5; white-space: nowrap;
+    }
+    [data-theme="dark"] .snooze-badge { background: #1e1e40; color: #9d9bf0; border-color: #3a387a; }
     .status-tag { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
     .title-text { font-weight: 500; }
     .expand-icon {
@@ -654,6 +696,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       <th class="sortable sort-active" data-sort="deadline" style="width:95px">Deadline <span class="sort-arrow">↑</span></th>
       <th class="sortable" data-sort="project" style="width:90px">Project <span class="sort-arrow"></span></th>
       <th class="sortable" data-sort="title">Item <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="priority" style="width:60px">Pri <span class="sort-arrow"></span></th>
       <th class="sortable" data-sort="status" style="width:130px">Status <span class="sort-arrow"></span></th>
       <th style="width:90px">Ref</th>
     </tr></thead>
@@ -696,6 +739,19 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <div class="form-row">
       <label>Depends on</label>
       <input type="text" id="add-depends" placeholder="e.g. 8,12 — item IDs that must close first (optional)">
+    </div>
+    <div class="form-row">
+      <label>Priority</label>
+      <select id="add-priority">
+        <option value="">— none —</option>
+        <option value="H">H — High</option>
+        <option value="M">M — Medium</option>
+        <option value="L">L — Low</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Snooze until</label>
+      <input type="date" id="add-snooze" placeholder="Hide from list until this date (optional)">
     </div>
     <div class="form-actions">
       <button class="btn-cancel" id="add-cancel">Cancel</button>
@@ -748,6 +804,19 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <div class="form-row">
       <label>Depends on</label>
       <input type="text" id="edit-depends" placeholder="e.g. 8,12 (blank to clear)">
+    </div>
+    <div class="form-row">
+      <label>Priority</label>
+      <select id="edit-priority">
+        <option value="">— none —</option>
+        <option value="H">H — High</option>
+        <option value="M">M — Medium</option>
+        <option value="L">L — Low</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Snooze until</label>
+      <input type="date" id="edit-snooze" placeholder="Hide until this date (blank to clear)">
     </div>
     <div class="form-actions" style="flex-wrap:wrap;gap:6px">
       <button class="btn-cancel" id="edit-cancel">Cancel</button>
@@ -874,6 +943,7 @@ __PROJECTS_META_JSON__
         case 'overdue':  vOk = !!(item.deadline && item.deadline < TODAY); break;
         case 'due-soon': vOk = dlClass(item.deadline) === 'due-soon'; break;
         case 'blocked':  vOk = !!(item.blocked_by && item.blocked_by.length); break;
+        case 'snoozed':  vOk = !!(item.wait_until && item.wait_until > TODAY); break;
         default:         vOk = true;
       }
       if (!vOk) return false;
@@ -889,16 +959,24 @@ __PROJECTS_META_JSON__
     });
   }
 
+  function priRank(p) { return p==='H'?0:p==='M'?1:p==='L'?2:3; }
+
   function sortItems(list) {
     var key = state.sort.key, dir = state.sort.dir;
     return list.slice().sort(function(a, b) {
       var va, vb;
-      if (key === 'deadline') { va = a.deadline || '9999-99-99'; vb = b.deadline || '9999-99-99'; }
-      else if (key === 'project') { va = a._project || ''; vb = b._project || ''; }
-      else if (key === 'status')  { va = a.status_tag || ''; vb = b.status_tag || ''; }
+      if (key === 'deadline')  { va = a.deadline || '9999-99-99'; vb = b.deadline || '9999-99-99'; }
+      else if (key === 'project')  { va = a._project || ''; vb = b._project || ''; }
+      else if (key === 'status')   { va = a.status_tag || ''; vb = b.status_tag || ''; }
+      else if (key === 'priority') { va = priRank(a.priority); vb = priRank(b.priority);
+        if (va !== vb) return (va - vb) * dir; }
       else { va = (a.title||'').replace(/^\\[XP[^\\]]*\\]\\s*/i,'').toLowerCase(); vb = (b.title||'').replace(/^\\[XP[^\\]]*\\]\\s*/i,'').toLowerCase(); }
-      if (va < vb) return -dir; if (va > vb) return dir;
-      if (key !== 'deadline') { var da = a.deadline||'9999-99-99', db = b.deadline||'9999-99-99'; if (da !== db) return da < db ? -1 : 1; }
+      if (typeof va === 'string') { if (va < vb) return -dir; if (va > vb) return dir; }
+      // tiebreakers: priority rank, then deadline
+      var pa = priRank(a.priority), pb = priRank(b.priority);
+      if (pa !== pb) return pa - pb;
+      var da = a.deadline||'9999-99-99', db = b.deadline||'9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
       return 0;
     });
   }
@@ -943,7 +1021,7 @@ __PROJECTS_META_JSON__
   var toolbar = document.getElementById('toolbar');
 
   // View tabs
-  var VIEW_DEFS = [{id:'surfaced',label:'Surfaced'},{id:'overdue',label:'Overdue'},{id:'due-soon',label:'Due Soon'},{id:'blocked',label:'Blocked'},{id:'all',label:'All'}];
+  var VIEW_DEFS = [{id:'surfaced',label:'Surfaced'},{id:'overdue',label:'Overdue'},{id:'due-soon',label:'Due Soon'},{id:'blocked',label:'Blocked'},{id:'snoozed',label:'Snoozed'},{id:'all',label:'All'}];
   VIEW_DEFS.forEach(function(f) {
     var btn = document.createElement('button');
     btn.className = 'filter-btn'; btn.setAttribute('data-view', f.id);
@@ -1033,7 +1111,7 @@ __PROJECTS_META_JSON__
     toolbar.querySelectorAll('[data-view]').forEach(function(btn) {
       var vid = btn.getAttribute('data-view');
       var cnt = getFiltered(undefined, undefined, vid).length;
-      var labels = {surfaced:'Surfaced',overdue:'Overdue','due-soon':'Due Soon',blocked:'Blocked',all:'All'};
+      var labels = {surfaced:'Surfaced',overdue:'Overdue','due-soon':'Due Soon',blocked:'Blocked',snoozed:'Snoozed',all:'All'};
       btn.innerHTML = esc(labels[vid]||vid) + ' <span class="count-badge">(' + cnt + ')</span>';
       btn.classList.toggle('active', state.view === vid);
     });
@@ -1073,7 +1151,7 @@ __PROJECTS_META_JSON__
     grouped.forEach(function(grp) {
       if (grp.label !== null) {
         var ghdr = document.createElement('tr'); ghdr.className = 'group-header';
-        ghdr.innerHTML = '<td colspan="5">' + esc(grp.label) + '<span class="group-count">(' + grp.items.length + ')</span></td>';
+        ghdr.innerHTML = '<td colspan="6">' + esc(grp.label) + '<span class="group-count">(' + grp.items.length + ')</span></td>';
         tbody.appendChild(ghdr);
       }
       grp.items.forEach(function(item) {
@@ -1097,15 +1175,26 @@ __PROJECTS_META_JSON__
           blockedHtml = '<span class="blocked-badge" title="Blocked by: ' + blkIds + '">&#x1F512; ' + blkIds + '</span>';
         }
 
+        var snoozeHtml = '';
+        if (item.wait_until) {
+          snoozeHtml = '<span class="snooze-badge" title="Snoozed until ' + esc(item.wait_until) + '">&#x1F4A4; ' + esc(item.wait_until) + '</span>';
+        }
+
+        var priHtml = '';
+        if (item.priority) {
+          priHtml = '<span class="pri-badge pri-' + esc(item.priority) + '">' + esc(item.priority) + '</span>';
+        }
+
         var tr = document.createElement('tr');
         tr.className = 'item-row' + (dc ? ' '+dc : '') + (hasDetail ? ' clickable' : '');
         tr.innerHTML =
           '<td class="deadline-cell">' + esc(dl) + '</td>' +
           '<td><span class="proj-badge">' + esc(item._project) + '</span>' + xpHtml + '</td>' +
           '<td class="title-cell"><span class="title-text">' + esc(item.title||'') + '</span>' +
-            recurHtml + blockedHtml +
+            recurHtml + blockedHtml + snoozeHtml +
             (hasDetail ? '<span class="expand-icon">&#9660;</span>' : '') +
             '<span class="edit-btn" title="Edit task">✎</span>' + '</td>' +
+          '<td>' + priHtml + '</td>' +
           '<td><span class="status-tag">' + esc(item.status_tag||'') + '</span></td>' +
           '<td class="ref-cell">' + esc(ref) + '</td>';
 
@@ -1124,7 +1213,7 @@ __PROJECTS_META_JSON__
 
         if (hasDetail) {
           var dr = document.createElement('tr'); dr.className='detail-row'; dr.id=detailId;
-          dr.innerHTML = '<td colspan="5">' + esc(item.status_detail) + '</td>';
+          dr.innerHTML = '<td colspan="6">' + esc(item.status_detail) + '</td>';
           tbody.appendChild(dr);
         }
         rowIdx++;
@@ -1174,6 +1263,8 @@ __PROJECTS_META_JSON__
     document.getElementById('add-xp').value = '';
     document.getElementById('add-recur').value = '';
     document.getElementById('add-depends').value = '';
+    document.getElementById('add-priority').value = '';
+    document.getElementById('add-snooze').value = '';
     addResult.textContent = ''; addResult.className = 'add-result';
     addCmdWrap.style.display = 'none';
   }
@@ -1206,6 +1297,8 @@ __PROJECTS_META_JSON__
     if (payload.xp_tags)    cmd += ' --xp '       + JSON.stringify(payload.xp_tags);
     if (payload.recur)      cmd += ' --recur '    + JSON.stringify(payload.recur);
     if (payload.depends_on) cmd += ' --depends '  + JSON.stringify(payload.depends_on);
+    if (payload.priority)   cmd += ' --priority ' + payload.priority;
+    if (payload.wait_until) cmd += ' --snooze '   + payload.wait_until;
     return cmd;
   }
 
@@ -1224,6 +1317,8 @@ __PROJECTS_META_JSON__
       xp_tags:    document.getElementById('add-xp').value.trim() || null,
       recur:      document.getElementById('add-recur').value.trim() || null,
       depends_on: document.getElementById('add-depends').value.trim() || null,
+      priority:   document.getElementById('add-priority').value || null,
+      wait_until: document.getElementById('add-snooze').value || null,
     };
 
     addCmdWrap.style.display = 'none';
@@ -1285,8 +1380,10 @@ __PROJECTS_META_JSON__
     document.getElementById('edit-deadline').value   = item.deadline || '';
     document.getElementById('edit-status-tag').value = item.status_tag || '';
     document.getElementById('edit-xp').value         = (item._xp_tags||[]).join(',');
-    document.getElementById('edit-recur').value      = item.recur    || '';
-    document.getElementById('edit-depends').value    = item.depends_on || '';
+    document.getElementById('edit-recur').value      = item.recur      || '';
+    document.getElementById('edit-depends').value    = item.depends_on  || '';
+    document.getElementById('edit-priority').value   = item.priority    || '';
+    document.getElementById('edit-snooze').value     = item.wait_until  || '';
     editResult.textContent = ''; editResult.className = 'add-result';
     editCmdWrap.style.display = 'none';
 
@@ -1327,8 +1424,10 @@ __PROJECTS_META_JSON__
     if (payload.section    !== undefined) cmd += ' --section '  + payload.section;
     if (payload.status_tag !== undefined) cmd += ' --tag '     + payload.status_tag;
     if (payload.xp_tags    !== undefined) cmd += ' --xp '      + JSON.stringify(payload.xp_tags);
-    if (payload.recur      !== undefined) cmd += ' --recur '   + JSON.stringify(payload.recur || '');
-    if (payload.depends_on !== undefined) cmd += ' --depends ' + JSON.stringify(payload.depends_on || '');
+    if (payload.recur      !== undefined) cmd += ' --recur '    + JSON.stringify(payload.recur || '');
+    if (payload.depends_on !== undefined) cmd += ' --depends '  + JSON.stringify(payload.depends_on || '');
+    if (payload.priority   !== undefined) cmd += ' --priority ' + JSON.stringify(payload.priority || '');
+    if (payload.wait_until !== undefined) cmd += ' --snooze '   + JSON.stringify(payload.wait_until || '');
     return cmd;
   }
 
@@ -1364,6 +1463,8 @@ __PROJECTS_META_JSON__
       xp_tags:    document.getElementById('edit-xp').value.trim() || null,
       recur:      document.getElementById('edit-recur').value.trim() || null,
       depends_on: document.getElementById('edit-depends').value.trim() || null,
+      priority:   document.getElementById('edit-priority').value || null,
+      wait_until: document.getElementById('edit-snooze').value || null,
     };
 
     var endpoint = '/api/update';

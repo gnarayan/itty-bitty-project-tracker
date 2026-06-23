@@ -134,7 +134,7 @@ def _check_fingerprint(proj_dir, raw_id, base_fp):
     conn = rollup.open_ro(db_path)
     cur  = conn.cursor()
     cur.execute(
-        "SELECT title, owner, deadline, section, status_tag, status_detail, xp_tags, recur, depends_on "
+        "SELECT title, owner, deadline, section, status_tag, status_detail, xp_tags, recur, depends_on, priority, wait_until "
         "FROM items WHERE raw_id = ?",
         (raw_id,)
     )
@@ -217,7 +217,29 @@ def _ensure_fresh():
 # Input validators
 # ---------------------------------------------------------------------------
 
-_RECUR_KEYWORDS = frozenset({'daily', 'weekly', 'monthly', 'yearly'})
+_RECUR_KEYWORDS   = frozenset({'daily', 'weekly', 'monthly', 'yearly'})
+_PRIORITY_VALUES  = frozenset({'H', 'M', 'L'})
+
+
+def _validate_priority(val):
+    """Return error string if val is not a valid priority, else None."""
+    if not val:
+        return None
+    if val.strip().upper() not in _PRIORITY_VALUES:
+        return f"invalid priority {val!r}; use H, M, or L"
+    return None
+
+
+def _validate_iso_date(val):
+    """Return error string if val is not a valid ISO date, else None."""
+    if not val:
+        return None
+    try:
+        from datetime import date as _date
+        _date.fromisoformat(val.strip())
+        return None
+    except ValueError:
+        return f"invalid date {val!r}; expected YYYY-MM-DD"
 
 
 def _validate_recur(rule):
@@ -250,6 +272,8 @@ def _validate_and_add(payload):
     xp_tags    = (payload.get("xp_tags")    or "").strip() or None
     recur      = (payload.get("recur")      or "").strip() or None
     depends_on = (payload.get("depends_on") or "").strip() or None
+    priority   = (payload.get("priority")   or "").strip().upper() or None
+    wait_until = (payload.get("wait_until") or "").strip() or None
 
     if not title:
         return 400, {"ok": False, "error": "title is required"}
@@ -260,6 +284,16 @@ def _validate_and_add(payload):
             return 400, {"ok": False, "error": err}
         if not deadline:
             return 400, {"ok": False, "error": "--recur requires a deadline"}
+
+    if priority:
+        err = _validate_priority(priority)
+        if err:
+            return 400, {"ok": False, "error": err}
+
+    if wait_until:
+        err = _validate_iso_date(wait_until)
+        if err:
+            return 400, {"ok": False, "error": err}
 
     proj_dir, todo_py, err = _resolve_project(project)
     if err:
@@ -279,6 +313,8 @@ def _validate_and_add(payload):
     if xp_tags:    cmd += ["--xp",      xp_tags]
     if recur:      cmd += ["--recur",   recur]
     if depends_on: cmd += ["--depends", depends_on]
+    if priority:   cmd += ["--priority", priority]
+    if wait_until: cmd += ["--snooze",   wait_until]
 
     with _WRITE_LOCK:
         r = subprocess.run(cmd, cwd=str(proj_dir), capture_output=True, text=True)
@@ -311,6 +347,8 @@ def _validate_and_update(payload):
     xp_tags    = payload.get("xp_tags")     # may be None to clear
     recur      = payload.get("recur")       # may be None to clear
     depends_on = payload.get("depends_on")  # may be None to clear
+    priority   = payload.get("priority")    # may be None to clear
+    wait_until = payload.get("wait_until")  # may be None to clear
 
     if not raw_id:
         return 400, {"ok": False, "error": "id is required"}
@@ -319,6 +357,16 @@ def _validate_and_update(payload):
 
     if recur:
         err = _validate_recur(recur)
+        if err:
+            return 400, {"ok": False, "error": err}
+
+    if priority:
+        err = _validate_priority(priority.strip().upper())
+        if err:
+            return 400, {"ok": False, "error": err}
+
+    if wait_until:
+        err = _validate_iso_date(wait_until)
         if err:
             return 400, {"ok": False, "error": err}
 
@@ -338,8 +386,10 @@ def _validate_and_update(payload):
         if section    is not None: cmd += ["--section",  section]
         if status_tag is not None: cmd += ["--tag",      status_tag]
         if xp_tags    is not None: cmd += ["--xp",       xp_tags]
-        if recur      is not None: cmd += ["--recur",    recur    or ""]
+        if recur      is not None: cmd += ["--recur",    recur      or ""]
         if depends_on is not None: cmd += ["--depends",  depends_on or ""]
+        if priority   is not None: cmd += ["--priority", priority   or ""]
+        if wait_until is not None: cmd += ["--snooze",   wait_until or ""]
 
         r = subprocess.run(cmd, cwd=str(proj_dir), capture_output=True, text=True)
         if r.returncode != 0:

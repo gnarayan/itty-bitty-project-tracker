@@ -156,6 +156,25 @@ _RECUR_KEYWORDS = {
     'daily': ('d', 1), 'weekly': ('w', 1), 'monthly': ('m', 1), 'yearly': ('y', 1),
 }
 
+_PRIORITY_VALUES = frozenset({'H', 'M', 'L'})
+
+
+def parse_priority(s):
+    """Return 'H', 'M', or 'L', or raise ValueError on invalid input."""
+    v = (s or '').strip().upper()
+    if v not in _PRIORITY_VALUES:
+        raise ValueError(f"invalid priority {s!r}; use H, M, or L")
+    return v
+
+
+def _valid_iso_date(s):
+    """Return the ISO date string if valid, else raise ValueError."""
+    try:
+        date.fromisoformat(s)
+        return s
+    except (ValueError, TypeError):
+        raise ValueError(f"invalid date {s!r}; expected YYYY-MM-DD")
+
 
 def parse_recur(rule):
     """Parse a recurrence rule into (unit, n) or raise ValueError.
@@ -258,7 +277,9 @@ CREATE TABLE IF NOT EXISTS items (
     status_detail TEXT,
     xp_tags       TEXT,
     recur         TEXT,
-    depends_on    TEXT
+    depends_on    TEXT,
+    priority      TEXT,
+    wait_until    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_status   ON items(status_tag);
 CREATE INDEX IF NOT EXISTS idx_section  ON items(section);
@@ -272,6 +293,8 @@ _MIGRATIONS = [
     ("xp_tags",    "TEXT"),
     ("recur",      "TEXT"),
     ("depends_on", "TEXT"),
+    ("priority",   "TEXT"),
+    ("wait_until", "TEXT"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -355,10 +378,19 @@ def cmd_list(args):
     conditions = []
     params     = []
 
-    if not args.all and not args.standing:
+    today_iso = date.today().isoformat()
+
+    if getattr(args, 'snoozed', False):
+        # Show only items currently hidden by a snooze date
+        conditions.append("wait_until IS NOT NULL AND wait_until > ?")
+        params.append(today_iso)
+    elif not args.all and not args.standing:
         closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
         conditions.append(f"status_tag NOT IN ({closed})")
         conditions.append("is_standing = 0")
+        # Hide snoozed items (wait_until in the future)
+        conditions.append("(wait_until IS NULL OR wait_until <= ?)")
+        params.append(today_iso)
     elif args.standing:
         conditions.append("is_standing = 1")
 
@@ -373,15 +405,20 @@ def cmd_list(args):
     if args.due_before:
         conditions.append("deadline IS NOT NULL AND deadline <= ?")
         params.append(args.due_before)
+    if getattr(args, 'search', None):
+        term = f"%{args.search}%"
+        conditions.append("(title LIKE ? OR status_detail LIKE ? OR status_tag LIKE ?)")
+        params += [term, term, term]
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = f"""
         SELECT raw_id, title, owner, deadline, status_emoji, status_tag, is_owner, section,
-               depends_on, recur
+               depends_on, recur, priority, wait_until
         FROM items
         {where}
         ORDER BY
             CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END,
+            CASE priority WHEN 'H' THEN 0 WHEN 'M' THEN 1 WHEN 'L' THEN 2 ELSE 3 END,
             is_owner DESC,
             CAST(SUBSTR(raw_id, 1, INSTR(raw_id||'x','x')-1) AS INTEGER)
         LIMIT ?
@@ -414,16 +451,18 @@ def cmd_list(args):
     print(header)
     print("-" * len(header))
     for r in rows:
-        title_short = re.sub(r'\*\*', '', r['title'])[:55]
-        owner_short = (r['owner'] or '')[:20]
-        deadline    = r['deadline'] or '—'
-        tag         = (r['status_emoji'] or '') + (r['status_tag'] or '')
-        marker      = "★" if (r['is_owner'] and OWNER_TAG_VARIANTS) else " "
-        recur_str   = f"  🔁 {r['recur']}" if r['recur'] else ""
-        dep_ids     = [x.strip() for x in (r['depends_on'] or '').split(',') if x.strip()]
-        blocked_by  = [x for x in dep_ids if x in active_ids]
-        blocked_str = ("  🔒 blocked by: " + ", ".join(f"#{x}" for x in blocked_by)) if blocked_by else ""
-        print(f"{marker}{r['raw_id']:<5} {title_short:<55} {owner_short:<20} {deadline:<11} {tag}{recur_str}{blocked_str}")
+        title_short  = re.sub(r'\*\*', '', r['title'])[:55]
+        owner_short  = (r['owner'] or '')[:20]
+        deadline     = r['deadline'] or '—'
+        tag          = (r['status_emoji'] or '') + (r['status_tag'] or '')
+        marker       = "★" if (r['is_owner'] and OWNER_TAG_VARIANTS) else " "
+        pri_str      = f" [{r['priority']}]" if r['priority'] else ""
+        recur_str    = f"  🔁 {r['recur']}" if r['recur'] else ""
+        snooze_str   = f"  💤 until {r['wait_until']}" if r['wait_until'] else ""
+        dep_ids      = [x.strip() for x in (r['depends_on'] or '').split(',') if x.strip()]
+        blocked_by   = [x for x in dep_ids if x in active_ids]
+        blocked_str  = ("  🔒 blocked by: " + ", ".join(f"#{x}" for x in blocked_by)) if blocked_by else ""
+        print(f"{marker}{r['raw_id']:<5} {title_short:<55} {owner_short:<20} {deadline:<11} {tag}{pri_str}{recur_str}{snooze_str}{blocked_str}")
 
     print(f"\n({len(rows)} items shown)")
 
@@ -480,6 +519,22 @@ def cmd_add(args):
         if not deadline:
             sys.exit("--recur requires a deadline (use --deadline YYYY-MM-DD)")
 
+    priority_val = None
+    raw_priority = getattr(args, 'priority', None)
+    if raw_priority:
+        try:
+            priority_val = parse_priority(raw_priority)
+        except ValueError as e:
+            sys.exit(str(e))
+
+    wait_val = None
+    raw_wait = getattr(args, 'snooze', None)
+    if raw_wait:
+        try:
+            wait_val = _valid_iso_date(raw_wait)
+        except ValueError as e:
+            sys.exit(str(e))
+
     conn = open_db()
     cur  = conn.cursor()
     # Acquire write lock before computing new ID so no concurrent CLI add
@@ -496,12 +551,12 @@ def cmd_add(args):
         INSERT INTO items
         (raw_id, sort_id, section, title, owner, source_date, deadline,
          status_tag, status_emoji, is_owner, is_standing, status_detail,
-         xp_tags, recur, depends_on)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         xp_tags, recur, depends_on, priority, wait_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (new_id, new_sort, args.section, args.title,
           args.owner or "", today, deadline,
           tag, emoji, owner_flag, is_standing, status_text,
-          xp_tags, recur_val, depends_val))
+          xp_tags, recur_val, depends_val, priority_val, wait_val))
     conn.commit()
     conn.close()
     print(f"Added item #{new_id} in section '{args.section}'")
@@ -567,6 +622,26 @@ def cmd_update(args):
     depends_val = getattr(args, 'depends', None)
     if depends_val is not None:
         updates['depends_on'] = depends_val or None
+
+    priority_val = getattr(args, 'priority', None)
+    if priority_val is not None:
+        if priority_val:
+            try:
+                priority_val = parse_priority(priority_val)
+            except ValueError as e:
+                conn.close()
+                sys.exit(str(e))
+        updates['priority'] = priority_val or None
+
+    wait_val = getattr(args, 'snooze', None)
+    if wait_val is not None:
+        if wait_val:
+            try:
+                wait_val = _valid_iso_date(wait_val)
+            except ValueError as e:
+                conn.close()
+                sys.exit(str(e))
+        updates['wait_until'] = wait_val or None
 
     if not updates:
         conn.close()
@@ -796,6 +871,8 @@ def build_parser():
     pl.add_argument("--status",     metavar="TAG",       help="Filter by status tag")
     pl.add_argument("--due-before", metavar="DATE",      help="Only items with deadline <= DATE (YYYY-MM-DD)")
     pl.add_argument("--standing",   action="store_true", help="Only standing/watch items")
+    pl.add_argument("--snoozed",    action="store_true", help="Only items currently snoozed (wait_until in the future)")
+    pl.add_argument("--search",     metavar="TERM",      help="Filter by text in title, status, or notes")
     pl.add_argument("--limit",      type=int, default=500, metavar="N")
     pl.add_argument("--json",       action="store_true", help="JSON output")
 
@@ -817,6 +894,12 @@ def build_parser():
                     help="Recurrence rule: daily/weekly/monthly/yearly or Nd/Nw/Nm/Ny (requires --deadline)")
     pa.add_argument("--depends",     metavar="ID[,ID]", default=None,
                     help="Comma-separated IDs of prerequisite items (informational; shown as 🔒 until met)")
+    pa.add_argument("--priority",    metavar="{H,M,L}", default=None,
+                    help="Priority: H (high), M (medium), or L (low)")
+    pa.add_argument("--snooze",      metavar="YYYY-MM-DD", default=None,
+                    help="Hide from default list until this date (--wait is an alias)")
+    pa.add_argument("--wait",        dest="snooze", metavar="YYYY-MM-DD", default=None,
+                    help="Alias for --snooze")
     pa.add_argument("--status",      metavar="TEXT", default=None)
     pa.add_argument("--status-file", metavar="FILE", default=None,
                     help="Read status text from file ('-' = stdin)")
@@ -834,6 +917,12 @@ def build_parser():
                     help="Set recurrence rule (empty string to clear)")
     pu.add_argument("--depends",     metavar="ID[,ID]", default=None,
                     help="Set prerequisite IDs (comma-separated, empty string to clear)")
+    pu.add_argument("--priority",    metavar="{H,M,L}", default=None,
+                    help="Set priority (empty string to clear)")
+    pu.add_argument("--snooze",      metavar="YYYY-MM-DD", default=None,
+                    help="Snooze until date (empty string to clear)")
+    pu.add_argument("--wait",        dest="snooze", metavar="YYYY-MM-DD", default=None,
+                    help="Alias for --snooze")
     pu.add_argument("--section",     metavar="SLUG", default=None)
     pu.add_argument("--status",      metavar="TEXT", default=None)
     pu.add_argument("--status-file", metavar="FILE", default=None,
