@@ -450,19 +450,23 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     :root {
       --bg-page: #f5f5f7; --bg-header: rgba(255,255,255,0.95); --bg-filter: #f5f5f7;
       --bg-row-hover: #fff; --bg-detail: #fafafa; --bg-badge: #e8e8ed;
-      --text-primary: #1d1d1f; --text-secondary: #6e6e73; --text-muted: #aeaeb2; --text-badge: #3a3a3c;
+      --text-primary: #1d1d1f; --text-secondary: #6e6e73; --text-muted: #6e6e73; --text-badge: #3a3a3c;
       --border: #d2d2d7; --border-row: #e8e8ed;
       --btn-active-bg: #1d1d1f; --btn-active-text: #fff; --btn-active-border: #1d1d1f;
+      --focus: #0071e3;
     }
     [data-theme="dark"] {
       --bg-page: #1c1c1e; --bg-header: rgba(28,28,30,0.97); --bg-filter: #1c1c1e;
       --bg-row-hover: #2c2c2e; --bg-detail: #2c2c2e; --bg-badge: #3a3a3c;
-      --text-primary: #f5f5f7; --text-secondary: #aeaeb2; --text-muted: #6e6e73; --text-badge: #d1d1d6;
+      --text-primary: #f5f5f7; --text-secondary: #aeaeb2; --text-muted: #8a8a8e; --text-badge: #d1d1d6;
       --border: #3a3a3c; --border-row: #2c2c2e;
       --btn-active-bg: #f5f5f7; --btn-active-text: #1c1c1e; --btn-active-border: #f5f5f7;
+      --focus: #64b5f6;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-page); color: var(--text-primary); font-size: 14px; min-height: 100vh; }
+    *:focus { outline: none; }
+    *:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
 
     .header {
       position: sticky; top: 0; z-index: 100;
@@ -504,7 +508,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     .search-wrap input {
       width: 100%; padding: 5px 26px 5px 10px; border-radius: 20px;
       border: 1.5px solid var(--border); background: var(--bg-header);
-      color: var(--text-primary); font-size: 12px; font-family: inherit; outline: none;
+      color: var(--text-primary); font-size: 12px; font-family: inherit;
       transition: border-color 0.12s;
     }
     .search-wrap input::placeholder { color: var(--text-muted); }
@@ -640,7 +644,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     .form-row input, .form-row select {
       width: 100%; padding: 7px 10px; border-radius: 8px; border: 1.5px solid var(--border);
       background: var(--bg-page); color: var(--text-primary); font-size: 13px;
-      font-family: inherit; outline: none; transition: border-color 0.12s;
+      font-family: inherit; transition: border-color 0.12s;
     }
     .form-row input:focus, .form-row select:focus { border-color: var(--text-primary); }
     .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
@@ -671,6 +675,23 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       color: var(--text-secondary); font-family: inherit; transition: all 0.12s;
     }
     .copy-btn:hover { border-color: var(--text-primary); color: var(--text-primary); }
+
+    /* ── Responsive ──────────────────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      .header { padding-left: 12px; padding-right: 12px; }
+      .toolbar { padding-left: 12px; padding-right: 12px; }
+      .status-bar { padding-left: 12px; padding-right: 12px; }
+      .table-wrap { padding-left: 12px; padding-right: 12px; padding-bottom: 32px; overflow-x: auto; }
+      table { min-width: 540px; }
+      .stats { flex-wrap: wrap; gap: 12px; }
+      .modal { min-width: 0; width: calc(100% - 24px); }
+      .search-wrap { min-width: 100px; }
+    }
+
+    /* ── Reduced motion ──────────────────────────────────────────────────────── */
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; animation: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -683,7 +704,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <div class="header-actions">
       <button class="icon-btn" id="add-btn">+ Add</button>
       <button class="icon-btn" id="group-btn">Group: <span id="group-label">None</span></button>
-      <button class="icon-btn" id="theme-btn">🌙</button>
+      <button class="icon-btn" id="theme-btn" aria-label="Toggle dark/light theme">🌙</button>
     </div>
   </div>
   <div class="stats" id="stats-bar"></div>
@@ -706,42 +727,42 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <div class="modal-overlay" id="add-overlay">
-  <div class="modal">
-    <h2>+ Add Task</h2>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-modal-title">
+    <h2 id="add-modal-title">+ Add Task</h2>
     <div class="form-row">
-      <label>Project</label>
+      <label for="add-project">Project</label>
       <select id="add-project"></select>
     </div>
     <div class="form-row">
-      <label>Section</label>
+      <label for="add-section">Section</label>
       <select id="add-section"></select>
     </div>
     <div class="form-row">
-      <label>Title *</label>
+      <label for="add-title">Title *</label>
       <input type="text" id="add-title" placeholder="Task description">
     </div>
     <div class="form-row">
-      <label>Owner</label>
+      <label for="add-owner">Owner</label>
       <input type="text" id="add-owner" placeholder="Optional">
     </div>
     <div class="form-row">
-      <label>Deadline</label>
+      <label for="add-deadline">Deadline</label>
       <input type="date" id="add-deadline">
     </div>
     <div class="form-row">
-      <label>Cross-project tags</label>
+      <label for="add-xp">Cross-project tags</label>
       <input type="text" id="add-xp" placeholder="e.g. ProjectA,ProjectB (optional)">
     </div>
     <div class="form-row">
-      <label>Recurrence</label>
+      <label for="add-recur">Recurrence</label>
       <input type="text" id="add-recur" placeholder="e.g. monthly, weekly, 2w (optional; requires deadline)">
     </div>
     <div class="form-row">
-      <label>Depends on</label>
+      <label for="add-depends">Depends on</label>
       <input type="text" id="add-depends" placeholder="e.g. 8,12 — item IDs that must close first (optional)">
     </div>
     <div class="form-row">
-      <label>Priority</label>
+      <label for="add-priority">Priority</label>
       <select id="add-priority">
         <option value="">— none —</option>
         <option value="H">H — High</option>
@@ -750,7 +771,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       </select>
     </div>
     <div class="form-row">
-      <label>Snooze until</label>
+      <label for="add-snooze">Snooze until</label>
       <input type="date" id="add-snooze" placeholder="Hide from list until this date (optional)">
     </div>
     <div class="form-actions">
@@ -767,46 +788,46 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <div class="modal-overlay" id="edit-overlay">
-  <div class="modal">
-    <h2>✎ Edit Task</h2>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+    <h2 id="edit-modal-title">✎ Edit Task</h2>
     <div class="form-row">
-      <label>Project</label>
+      <label for="edit-project">Project</label>
       <input type="text" id="edit-project" disabled style="opacity:0.6;cursor:not-allowed">
     </div>
     <div class="form-row">
-      <label>Section</label>
+      <label for="edit-section">Section</label>
       <select id="edit-section"></select>
     </div>
     <div class="form-row">
-      <label>Title *</label>
+      <label for="edit-title">Title *</label>
       <input type="text" id="edit-title" placeholder="Task description">
     </div>
     <div class="form-row">
-      <label>Owner</label>
+      <label for="edit-owner">Owner</label>
       <input type="text" id="edit-owner" placeholder="Optional">
     </div>
     <div class="form-row">
-      <label>Deadline</label>
+      <label for="edit-deadline">Deadline</label>
       <input type="date" id="edit-deadline">
     </div>
     <div class="form-row">
-      <label>Status tag</label>
+      <label for="edit-status-tag">Status tag</label>
       <input type="text" id="edit-status-tag" placeholder="e.g. OPEN, IN PROGRESS, DONE">
     </div>
     <div class="form-row">
-      <label>Cross-project tags</label>
+      <label for="edit-xp">Cross-project tags</label>
       <input type="text" id="edit-xp" placeholder="e.g. ProjectA,ProjectB (optional)">
     </div>
     <div class="form-row">
-      <label>Recurrence</label>
+      <label for="edit-recur">Recurrence</label>
       <input type="text" id="edit-recur" placeholder="e.g. monthly, weekly, 2w (blank to clear)">
     </div>
     <div class="form-row">
-      <label>Depends on</label>
+      <label for="edit-depends">Depends on</label>
       <input type="text" id="edit-depends" placeholder="e.g. 8,12 (blank to clear)">
     </div>
     <div class="form-row">
-      <label>Priority</label>
+      <label for="edit-priority">Priority</label>
       <select id="edit-priority">
         <option value="">— none —</option>
         <option value="H">H — High</option>
@@ -815,7 +836,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       </select>
     </div>
     <div class="form-row">
-      <label>Snooze until</label>
+      <label for="edit-snooze">Snooze until</label>
       <input type="date" id="edit-snooze" placeholder="Hide until this date (blank to clear)">
     </div>
     <div class="form-actions" style="flex-wrap:wrap;gap:6px">
@@ -1047,7 +1068,7 @@ __PROJECTS_META_JSON__
   // Search
   var sw = document.createElement('div'); sw.className = 'search-wrap';
   var si = document.createElement('input'); si.type='text'; si.id='search-input'; si.placeholder='Search…';
-  var sc = document.createElement('button'); sc.className='search-clear'; sc.textContent='✕'; sc.title='Clear';
+  var sc = document.createElement('button'); sc.className='search-clear'; sc.textContent='✕'; sc.title='Clear'; sc.setAttribute('aria-label', 'Clear search');
   sw.appendChild(si); sw.appendChild(sc); toolbar.appendChild(sw);
   si.oninput = function() { state.search = this.value; sc.style.display = this.value?'block':'none'; render(); };
   sc.onclick  = function() { state.search=''; si.value=''; sc.style.display='none'; render(); };
@@ -1187,27 +1208,38 @@ __PROJECTS_META_JSON__
 
         var tr = document.createElement('tr');
         tr.className = 'item-row' + (dc ? ' '+dc : '') + (hasDetail ? ' clickable' : '');
+        if (hasDetail) { tr.setAttribute('tabindex', '0'); tr.setAttribute('aria-expanded', 'false'); }
         tr.innerHTML =
           '<td class="deadline-cell">' + esc(dl) + '</td>' +
           '<td><span class="proj-badge">' + esc(item._project) + '</span>' + xpHtml + '</td>' +
           '<td class="title-cell"><span class="title-text">' + esc(item.title||'') + '</span>' +
             recurHtml + blockedHtml + snoozeHtml +
-            (hasDetail ? '<span class="expand-icon">&#9660;</span>' : '') +
-            '<span class="edit-btn" title="Edit task">✎</span>' + '</td>' +
+            (hasDetail ? '<span class="expand-icon" aria-hidden="true">&#9660;</span>' : '') +
+            '<span class="edit-btn" role="button" tabindex="0" aria-label="Edit task" title="Edit task">✎</span>' + '</td>' +
           '<td>' + priHtml + '</td>' +
           '<td><span class="status-tag">' + esc(item.status_tag||'') + '</span></td>' +
           '<td class="ref-cell">' + esc(ref) + '</td>';
 
         if (hasDetail) {
-          tr.onclick = (function(row, did) {
-            return function() { row.classList.toggle('open'); var dr = document.getElementById(did); if (dr) dr.classList.toggle('open'); };
+          var toggleDetail = (function(row, did) {
+            return function() {
+              row.classList.toggle('open');
+              var dr = document.getElementById(did);
+              if (dr) dr.classList.toggle('open');
+              row.setAttribute('aria-expanded', row.classList.contains('open') ? 'true' : 'false');
+            };
           })(tr, detailId);
+          tr.onclick = toggleDetail;
+          tr.onkeydown = function(e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDetail(); } };
         }
 
         // Edit button — stop propagation so it doesn't toggle the detail row
         (function(it) {
           var eb = tr.querySelector('.edit-btn');
-          if (eb) eb.onclick = function(e) { e.stopPropagation(); openEdit(it); };
+          if (eb) {
+            eb.onclick = function(e) { e.stopPropagation(); openEdit(it); };
+            eb.onkeydown = function(e) { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); openEdit(it); } };
+          }
         })(item);
         tbody.appendChild(tr);
 
@@ -1269,18 +1301,20 @@ __PROJECTS_META_JSON__
     addCmdWrap.style.display = 'none';
   }
 
+  var _addOpener = null;
+  function closeAdd() { addOverlay.classList.remove('open'); if (_addOpener) { _addOpener.focus(); _addOpener = null; } }
+
   document.getElementById('add-btn').onclick = function() {
+    _addOpener = this;
     resetModal();
     addOverlay.classList.add('open');
     document.getElementById('add-title').focus();
   };
 
-  document.getElementById('add-cancel').onclick = function() {
-    addOverlay.classList.remove('open');
-  };
+  document.getElementById('add-cancel').onclick = closeAdd;
 
   addOverlay.onclick = function(e) {
-    if (e.target === addOverlay) addOverlay.classList.remove('open');
+    if (e.target === addOverlay) closeAdd();
   };
 
   function buildCmd(payload) {
@@ -1401,11 +1435,13 @@ __PROJECTS_META_JSON__
         editSection.appendChild(opt);
       });
     }
+    _editOpener = document.activeElement;
     editOverlay.classList.add('open');
     document.getElementById('edit-title').focus();
   }
 
-  function closeEdit() { editOverlay.classList.remove('open'); _editItem = null; }
+  var _editOpener = null;
+  function closeEdit() { editOverlay.classList.remove('open'); _editItem = null; if (_editOpener) { _editOpener.focus(); _editOpener = null; } }
 
   document.getElementById('edit-cancel').onclick = closeEdit;
   editOverlay.onclick = function(e) { if (e.target === editOverlay) closeEdit(); };
@@ -1525,6 +1561,14 @@ __PROJECTS_META_JSON__
       setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
     });
   };
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      if (addOverlay.classList.contains('open')) { closeAdd(); }
+      else if (editOverlay.classList.contains('open')) { closeEdit(); }
+    }
+  });
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   loadState();
