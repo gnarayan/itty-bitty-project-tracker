@@ -582,7 +582,7 @@ def cmd_update(args):
         updates['status_detail'] = new_status
         tag, deadline, emoji, _ = derive_fields(new_status, row['title'], args.tag, args.deadline)
         updates['status_tag']   = tag
-        updates['deadline']     = deadline
+        updates['deadline']     = deadline if deadline else row['deadline']
         updates['status_emoji'] = emoji
 
     if args.title is not None:

@@ -104,6 +104,46 @@ class TestDone(_ProjectFixture):
         self.assertIn("Archived task", archive.read_text())
 
 
+class TestUpdateDeadline(_ProjectFixture):
+    """A bare --status update must not silently wipe an existing deadline."""
+
+    def _deadline_of(self, raw_id="1"):
+        r = self._run("list", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        items = {it["raw_id"]: it for it in json.loads(r.stdout)}
+        self.assertIn(raw_id, items)
+        return items[raw_id]["deadline"]
+
+    def test_status_update_preserves_existing_deadline(self):
+        self._init()
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        self._run("add", "--section", "active", "--title", "Has a deadline",
+                  "--deadline", soon)
+        self.assertEqual(self._deadline_of(), soon)
+        r = self._run("update", "1", "--status", "progress, no iso date in this text")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._deadline_of(), soon)
+
+    def test_status_update_sets_deadline_from_keyword(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "No deadline yet")
+        self.assertIsNone(self._deadline_of())
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        r = self._run("update", "1", "--status", f"deadline: {soon}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._deadline_of(), soon)
+
+    def test_status_with_explicit_deadline_flag_wins(self):
+        self._init()
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        later = (date.today() + timedelta(days=10)).isoformat()
+        self._run("add", "--section", "active", "--title", "Reschedule me",
+                  "--deadline", soon)
+        r = self._run("update", "1", "--status", "rescheduled", "--deadline", later)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._deadline_of(), later)
+
+
 class TestFingerprint(_ProjectFixture):
     def test_fingerprint_is_16_hex_chars(self):
         self._init()
