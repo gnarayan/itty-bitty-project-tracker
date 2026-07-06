@@ -79,7 +79,7 @@ python3 scripts/todo.py update <id> --tag "IN PROGRESS"
 python3 scripts/todo.py update <id> --title "New title" --section backlog
 
 # Append a dated status note — non-destructive, always safe for updates
-python3 scripts/todo.py append <id> "Sent draft to collaborator"
+python3 scripts/todo.py append <id> --text "Sent draft to collaborator"
 
 # Mark done and move to archive
 python3 scripts/todo.py done <id>
@@ -185,7 +185,7 @@ This project uses [itty-bitty-project-tracker](https://github.com/gnarayan/itty-
 - **Recur:** `--recur RULE` on add/update (e.g. `weekly`, `2w`, `monthly`); **requires --deadline**; `done` respawns next occurrence, `archive` does not; clear with `--recur ""`
 - **Depends:** `--depends ID[,ID]` on add/update; informational; shown as 🔒 until prerequisites close; clear with `--depends ""`
 - **Update:** `python3 scripts/todo.py update <id> [--deadline YYYY-MM-DD] [--tag STATUS] [--title ...]`
-- **Note:** `python3 scripts/todo.py append <id> "status note"` — safe, non-destructive
+- **Note:** `python3 scripts/todo.py append <id> --text "status note"` — safe, non-destructive
 - **Done:** `python3 scripts/todo.py done <id>` — **irreversible**; confirm id first
 - Valid sections: `SECTION_ORDER` in `scripts/tracker_config.py`
 - Never edit `action_items.md` directly (auto-generated export).

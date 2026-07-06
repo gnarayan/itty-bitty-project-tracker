@@ -298,7 +298,7 @@ python3 scripts/todo.py update <id> --priority M   # set priority (H/M/L; "" to 
 python3 scripts/todo.py update <id> --snooze 2026-09-01  # snooze; "" to clear; --wait is alias
 python3 scripts/todo.py update <id> --recur 2w     # Nd/Nw/Nm/Ny or daily/weekly/monthly/yearly
 python3 scripts/todo.py update <id> --depends 5,9  # prerequisite IDs; "" to clear
-python3 scripts/todo.py append <id> "Status note"  # dated note appended to status_detail
+python3 scripts/todo.py append <id> --text "Status note"  # dated note appended to status_detail
 python3 scripts/todo.py done <id>                   # mark done; recurring items respawn next occurrence
 python3 scripts/todo.py archive <id>                # mark archived (recurring items do NOT respawn)
 python3 scripts/todo.py export                      # regenerate action_items.md from DB
