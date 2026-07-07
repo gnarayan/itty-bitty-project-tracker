@@ -133,6 +133,31 @@ class TestUpdateDeadline(_ProjectFixture):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._deadline_of(), soon)
 
+    def test_status_log_timestamps_are_not_mistaken_for_deadline(self):
+        """Bare '**YYYY-MM-DD:** note' log-entry headers (this tracker's own
+        status-log convention, also injected by `append`) must never be
+        misread as a deadline."""
+        self._init()
+        self._run("add", "--section", "active", "--title", "No real deadline")
+        self.assertIsNone(self._deadline_of())
+        r = self._run("update", "1", "--status",
+                       "OPEN — status.\n**2026-06-30:** Abstract submitted.\n"
+                       "**2026-07-07:** doc shared.")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self._deadline_of())
+
+    def test_status_bold_callout_without_keyword_still_sets_deadline(self):
+        """A genuine bolded deadline callout with no literal 'deadline'/'due'
+        keyword should still be caught (the fallback isn't fully disabled)."""
+        self._init()
+        self._run("add", "--section", "active", "--title", "Hard cutoff")
+        self.assertIsNone(self._deadline_of())
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        r = self._run("update", "1", "--status",
+                       f"**Hard cutoff {soon} — no exceptions**")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._deadline_of(), soon)
+
     def test_status_with_explicit_deadline_flag_wins(self):
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()

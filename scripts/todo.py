@@ -146,9 +146,16 @@ def extract_deadline(text):
     m = re.search(r'(?:deadline|due\s*(?:date)?)[:\s]+(\d{4}-\d{2}-\d{2})', text, re.I)
     if m:
         return m.group(1)
-    m = re.search(r'\*\*[^*]*?(20\d{2}-\d{2}-\d{2})[^*]*?\*\*', text)
-    if m:
-        return m.group(1)
+    for m in re.finditer(r'\*\*([^*]*?)\*\*', text):
+        span = m.group(1)
+        # Skip this tracker's own status-log timestamp convention
+        # ("**YYYY-MM-DD:** note text" — injected by cmd_append and used
+        # manually throughout status_detail logs); it is never a deadline.
+        if re.fullmatch(r'\s*20\d{2}-\d{2}-\d{2}:?\s*', span):
+            continue
+        dm = re.search(r'(20\d{2}-\d{2}-\d{2})', span)
+        if dm:
+            return dm.group(1)
     return None
 
 
