@@ -14,12 +14,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.8", "3.11", "3.12"]
+        exclude:
+          # CPython 3.8 (EOL) has no arm64 builds; macos-latest is migrating
+          # to macOS 26. 3.8 coverage is preserved on ubuntu-latest.
+          - os: macos-latest
+            python-version: "3.8"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 

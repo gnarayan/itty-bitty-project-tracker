@@ -289,8 +289,10 @@ class TestDBErrors(_ProjectFixture):
 
     def test_locked_db_gives_friendly_message(self):
         """A write that can't get the lock within busy_timeout yields a friendly
-        message, not a traceback. Holds an EXCLUSIVE lock longer than the 5 s
-        busy_timeout so the writer reliably times out."""
+        message, not a traceback. Holds an EXCLUSIVE lock far longer than the
+        5 s busy_timeout so the writer reliably times out even when CLI
+        subprocess startup is slow (CI runners); terminate() in finally ends
+        the hold as soon as the assertions run, so the test stays fast."""
         self._init()
         db = self.proj / "action_items.db"
         locker = subprocess.Popen(
@@ -299,7 +301,7 @@ class TestDBErrors(_ProjectFixture):
              "c=sqlite3.connect(sys.argv[1]);"
              "c.execute('BEGIN EXCLUSIVE');"
              "print('locked', flush=True);"
-             "time.sleep(8)", str(db)],
+             "time.sleep(30)", str(db)],
             stdout=subprocess.PIPE, text=True,
         )
         try:
