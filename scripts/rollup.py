@@ -1260,7 +1260,7 @@ __PROJECTS_META_JSON__
         if (hasDetail) { tr.setAttribute('tabindex', '0'); tr.setAttribute('aria-expanded', 'false'); }
         tr.innerHTML =
           '<td class="deadline-cell">' + esc(dl) + '</td>' +
-          '<td><span class="proj-badge">' + esc(item._project) + '</span>' + xpHtml + '</td>' +
+          '<td><span class="proj-badge">' + esc(numRefLabel(item) || item._project) + '</span>' + xpHtml + '</td>' +
           '<td class="title-cell"><span class="title-text">' + esc(item.title||'') + '</span>' +
             recurHtml + blockedHtml + snoozeHtml +
             (hasDetail ? '<span class="expand-icon" aria-hidden="true">&#9660;</span>' : '') +
