@@ -28,12 +28,19 @@ directory that uses this tracker. Full flag reference: [REFERENCE.md](REFERENCE.
    mean to replace the whole status.
 8. **Prefer the CLI over reading `action_items.md`**: `list` output is a
    compact table ~20× smaller with the same information.
+9. **Ids are short hashes** (e.g. `a3f8`), never reused. Old numeric ids from
+   before the hash migration still resolve everywhere (`legacy_id` fallback) —
+   but always cite the hash id from `list` output in new notes and `--depends`.
 
 ---
 
 ## Command crib
 
 ```bash
+# Orient (start of session)
+python3 scripts/todo.py prime                      # counts + overdue/ready/blocked + conventions, agent-ready
+python3 scripts/todo.py ready [--json]             # open items with no active blockers — "what can I work on now"
+
 # Read
 python3 scripts/todo.py list                       # open items (snoozed hidden); badges: [H/M/L], 🔁, 💤, 🔒
 python3 scripts/todo.py list --section <slug> | --due-before YYYY-MM-DD | --search TERM
@@ -42,6 +49,7 @@ python3 scripts/todo.py show <id>                  # full record incl. status no
 python3 scripts/rollup.py --json                   # cross-project dump (hub dir only)
 
 # Write
+python3 scripts/todo.py claim <id> [--by NAME]     # atomic: sets IN PROGRESS, fails if already claimed; release: update <id> --tag OPEN
 python3 scripts/todo.py add --title "..." [--section slug] [--deadline YYYY-MM-DD] [--owner X]
 python3 scripts/todo.py add --title "[XP] cross-project item"      # or --xp "LabelA,LabelB"
 python3 scripts/todo.py update <id> [--deadline YYYY-MM-DD] [--tag STATUS] [--title ...] [--section slug]
@@ -76,8 +84,10 @@ it with `python3 scripts/rollup.py --html` after CLI writes. Do not enable
 
 This project uses [itty-bitty-project-tracker](https://github.com/gnarayan/itty-bitty-project-tracker).
 
+- **Orient:** `python3 scripts/todo.py prime` (counts + overdue/ready/blocked + conventions); `ready` for unblocked items
 - **Read:** `python3 scripts/todo.py list` (compact table; prefer over action_items.md); `show <id>` for detail
 - **Search:** `list --search TERM`; `--snoozed`/`--all`/`--standing` widen the view
+- **Claim:** `claim <id> [--by NAME]` before starting work — atomic, fails if another session already claimed it
 - **Add:** `python3 scripts/todo.py add --title "..."` (--section defaults to first slug in scripts/tracker_config.py)
 - **Update:** `update <id> [--deadline YYYY-MM-DD] [--tag STATUS] [--priority H|M|L] [--snooze DATE] [--recur RULE] [--depends IDs]` — pass "" to clear a field; --recur requires a deadline
 - **Note:** `append <id> --text "..."` — dated, non-destructive; the safe default for status updates

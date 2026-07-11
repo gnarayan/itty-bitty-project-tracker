@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tracker [up|down|restart|install|uninstall|add|list|done <id>|init-project <label> <path>]
+# tracker [up|down|restart|install|uninstall|add|list|ready|done <id>|init-project <label> <path>]
 #
 # Manages the priorities dashboard server and provides short aliases for the
 # most-used todo.py commands.
@@ -89,9 +89,10 @@ do_down() {
 
 # Short aliases — pass all remaining arguments through to todo.py.
 # --section defaults to the first configured slug when omitted (see todo.py).
-do_add()  { python3 "$DIR/scripts/todo.py" add  "$@"; }
-do_list() { python3 "$DIR/scripts/todo.py" list "$@"; }
-do_done() { python3 "$DIR/scripts/todo.py" done "$@"; }
+do_add()   { python3 "$DIR/scripts/todo.py" add   "$@"; }
+do_list()  { python3 "$DIR/scripts/todo.py" list  "$@"; }
+do_ready() { python3 "$DIR/scripts/todo.py" ready "$@"; }
+do_done()  { python3 "$DIR/scripts/todo.py" done  "$@"; }
 
 do_init_project() {
     local label="$1"
@@ -206,12 +207,13 @@ case "${1:-up}" in
     restart)      do_down; sleep 1; do_up ;;
     install)      do_install ;;
     uninstall)    do_uninstall ;;
-    add)          shift; do_add  "$@" ;;
-    list)         shift; do_list "$@" ;;
-    done)         shift; do_done "$@" ;;
+    add)          shift; do_add   "$@" ;;
+    list)         shift; do_list  "$@" ;;
+    ready)        shift; do_ready "$@" ;;
+    done)         shift; do_done  "$@" ;;
     init-project) do_init_project "${2:-}" "${3:-}" ;;
     *)
-        echo "Usage: tracker [up|down|restart|install|uninstall|add [opts]|list [opts]|done <id>|init-project <label> <path>]" >&2
+        echo "Usage: tracker [up|down|restart|install|uninstall|add [opts]|list [opts]|ready [opts]|done <id>|init-project <label> <path>]" >&2
         exit 1
         ;;
 esac

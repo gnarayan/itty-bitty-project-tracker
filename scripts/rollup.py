@@ -206,9 +206,10 @@ def fetch_master_items(cutoff_date_str):
     deps_col   = ", depends_on" if has_deps   else ""
     pri_col    = ", priority"   if has_pri    else ""
     wait_col   = ", wait_until" if has_wait   else ""
+    leg_col    = ", legacy_id"  if _has_column(conn, "items", "legacy_id") else ""
     cur.execute(f"""
         SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
-               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}
+               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}{leg_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
@@ -249,11 +250,12 @@ def fetch_project_items(label, db_path, cutoff_date_str):
     deps_col  = ", depends_on" if has_deps   else ""
     pri_col   = ", priority"   if has_pri    else ""
     wait_col  = ", wait_until" if has_wait   else ""
+    leg_col   = ", legacy_id"  if _has_column(conn, "items", "legacy_id") else ""
     xp_cond   = "OR (xp_tags IS NOT NULL AND xp_tags != '')" if has_xp else ""
     pri_cond  = "OR (priority = 'H')" if has_pri else ""
     cur.execute(f"""
         SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
-               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}
+               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}{leg_col}
         FROM items
         WHERE status_tag NOT IN ({closed})
           AND is_standing = 0
@@ -300,9 +302,10 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
     deps_col  = ", depends_on" if has_deps   else ""
     pri_col   = ", priority"   if has_pri    else ""
     wait_col  = ", wait_until" if has_wait   else ""
+    leg_col   = ", legacy_id"  if _has_column(conn, "items", "legacy_id") else ""
     cur.execute(f"""
         SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
-               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}
+               is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}{leg_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
@@ -954,6 +957,11 @@ __PROJECTS_META_JSON__
     return (item._project === 'Master' ? 'priorities' : item._project) + '#' + item.raw_id;
   }
 
+  function legacyRefLabel(item) {
+    if (!item.legacy_id) return '';
+    return (item._project === 'Master' ? 'priorities' : item._project) + '#' + item.legacy_id;
+  }
+
   function esc(s) {
     return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
@@ -994,6 +1002,8 @@ __PROJECTS_META_JSON__
         case 'overdue':  vOk = !!(item.deadline && item.deadline < TODAY); break;
         case 'due-soon': vOk = dlClass(item.deadline) === 'due-soon'; break;
         case 'blocked':  vOk = !!(item.blocked_by && item.blocked_by.length); break;
+        case 'ready':    vOk = !(item.blocked_by && item.blocked_by.length) &&
+                               !(item.wait_until && item.wait_until > TODAY); break;
         case 'snoozed':  vOk = !!(item.wait_until && item.wait_until > TODAY); break;
         default:         vOk = true;
       }
@@ -1006,7 +1016,8 @@ __PROJECTS_META_JSON__
       if (q && (item.title || '').toLowerCase().indexOf(q) < 0 &&
                (item.status_tag || '').toLowerCase().indexOf(q) < 0 &&
                (item.status_detail || '').toLowerCase().indexOf(q) < 0 &&
-               refLabel(item).toLowerCase().indexOf(q) < 0) return false;
+               refLabel(item).toLowerCase().indexOf(q) < 0 &&
+               legacyRefLabel(item).toLowerCase().indexOf(q) < 0) return false;
       return true;
     });
   }
@@ -1073,7 +1084,7 @@ __PROJECTS_META_JSON__
   var toolbar = document.getElementById('toolbar');
 
   // View tabs
-  var VIEW_DEFS = [{id:'surfaced',label:'Surfaced'},{id:'overdue',label:'Overdue'},{id:'due-soon',label:'Due Soon'},{id:'blocked',label:'Blocked'},{id:'snoozed',label:'Snoozed'},{id:'all',label:'All'}];
+  var VIEW_DEFS = [{id:'surfaced',label:'Surfaced'},{id:'ready',label:'Ready'},{id:'overdue',label:'Overdue'},{id:'due-soon',label:'Due Soon'},{id:'blocked',label:'Blocked'},{id:'snoozed',label:'Snoozed'},{id:'all',label:'All'}];
   VIEW_DEFS.forEach(function(f) {
     var btn = document.createElement('button');
     btn.className = 'filter-btn'; btn.setAttribute('data-view', f.id);
@@ -1163,7 +1174,7 @@ __PROJECTS_META_JSON__
     toolbar.querySelectorAll('[data-view]').forEach(function(btn) {
       var vid = btn.getAttribute('data-view');
       var cnt = getFiltered(undefined, undefined, vid).length;
-      var labels = {surfaced:'Surfaced',overdue:'Overdue','due-soon':'Due Soon',blocked:'Blocked',snoozed:'Snoozed',all:'All'};
+      var labels = {surfaced:'Surfaced',ready:'Ready',overdue:'Overdue','due-soon':'Due Soon',blocked:'Blocked',snoozed:'Snoozed',all:'All'};
       btn.innerHTML = esc(labels[vid]||vid) + ' <span class="count-badge">(' + cnt + ')</span>';
       btn.classList.toggle('active', state.view === vid);
     });

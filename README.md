@@ -94,15 +94,25 @@ The handful of commands that cover most days (full flag reference: [REFERENCE.md
 ```bash
 python3 scripts/todo.py list                          # what's open (snoozed hidden)
 python3 scripts/todo.py add --title "..." --deadline 2026-07-01
-python3 scripts/todo.py append 12 --text "sent draft" # dated status note
-python3 scripts/todo.py update 12 --deadline 2026-07-15
-python3 scripts/todo.py done 12                       # close + archive (irreversible)
+python3 scripts/todo.py append a3f8 --text "sent draft" # dated status note
+python3 scripts/todo.py update a3f8 --deadline 2026-07-15
+python3 scripts/todo.py done a3f8                     # close + archive (irreversible)
 ```
+
+Item ids are short hashes (`a3f8`) — collision-free across machines and never
+reused. Older DBs with numeric ids: run `migrate-ids` once (the old numeric
+ids keep working afterwards; [details](REFERENCE.md#migrating-a-pre-hash-db-migrate-ids)).
 
 Useful extras, one flag each: `--priority H|M|L`, `--snooze YYYY-MM-DD`,
 `--recur weekly|2w|monthly|…` (respawns on `done`), `--depends 3,7`,
 `--xp "ProjectA"` or an `[XP]` title prefix to force an item into the
 cross-project rollup. Semantics: [REFERENCE.md](REFERENCE.md#feature-semantics).
+
+For agents (and impatient humans): `ready` lists open items with no unmet
+dependencies ("what can I work on now"), `claim <id>` atomically marks an item
+IN PROGRESS so two sessions can't grab the same one, and `prime` dumps a
+compact session-start snapshot (counts, overdue/ready/blocked, conventions).
+See [AGENTS.md](AGENTS.md).
 
 **The dashboard** (`python3 scripts/rollup.py --html`, or just load
 `http://127.0.0.1:8765` when the server is up) shows everything surfaced across

@@ -71,7 +71,11 @@ python3 scripts/todo.py list --snoozed              # only currently-snoozed ite
 python3 scripts/todo.py list --all                  # includes snoozed and closed-tagged
 python3 scripts/todo.py list --standing             # standing/watch items only
 python3 scripts/todo.py list --json                 # machine-readable output
+python3 scripts/todo.py ready                       # open items with no active blockers (not snoozed/standing)
+python3 scripts/todo.py ready --section active --json
 python3 scripts/todo.py show <id>                   # full record
+python3 scripts/todo.py claim <id> --by "agent-1"   # atomic: set IN PROGRESS + owner; fails if already claimed
+python3 scripts/todo.py prime                       # agent-ready context: counts, overdue/ready/blocked, conventions
 python3 scripts/todo.py update <id> --deadline 2026-07-15   # ISO-validated; "" clears
 python3 scripts/todo.py update <id> --tag "IN PROGRESS"     # set status tag
 python3 scripts/todo.py update <id> --priority M    # H/M/L; "" to clear
@@ -83,12 +87,28 @@ python3 scripts/todo.py update <id> --status-file - # multi-line status via stdi
 python3 scripts/todo.py append <id> --text "Status note"  # dated note appended to status_detail
 python3 scripts/todo.py done <id>                   # mark done; recurring items respawn next occurrence
 python3 scripts/todo.py archive <id>                # mark archived (recurring items do NOT respawn)
+python3 scripts/todo.py migrate-ids                 # one-time: numeric ids -> hash ids (backs up DB first)
 python3 scripts/todo.py export                      # regenerate action_items.md from DB
 ```
 
-Item ids are **never reused**: closing an item retires its id permanently (a
-monotone counter in the `meta` table), so archive rows and `--depends`
-references stay unambiguous.
+Item ids are 4-char lowercase-hex hashes containing at least one letter
+(e.g. `a3f8`) — collision-free across machines and **never reused**: closing
+an item keeps its id registered in `issued_ids`, so archive rows and
+`--depends` references stay unambiguous. Since a hash always contains a
+letter, it can never collide with a pre-hash numeric id.
+
+### Migrating a pre-hash DB (`migrate-ids`)
+
+DBs created before hash ids hold numeric ids (`1`, `2`, …). Run
+`python3 scripts/todo.py migrate-ids` once per project: it backs up the DB
+(`action_items.db.bak-<timestamp>`), rewrites every numeric id to a fresh
+hash, stores the old id in `legacy_id`, and rewrites all `depends_on` lists.
+Old numeric ids keep resolving everywhere — `show 12`, `done 12`, dashboard
+ref search for `Project#12` — via the `legacy_id` fallback, so archive rows
+and prose references never dangle. `--depends` values given as legacy ids are
+normalized to the canonical hash at write time. Un-migrated DBs keep working
+(new items simply get hash ids alongside the old numeric ones), but migrating
+is recommended before multi-machine use.
 
 Setting a closed tag by hand (`update <id> --tag DONE`) prints a warning: the
 item stays in the DB, hidden from `list`/rollup but still exported to markdown.
@@ -163,6 +183,30 @@ task. Clear with `--recur ""`.
 Informational — does not block writes or completion. Unmet dependencies show a
 `🔒 blocked by: #X` badge in `list` and the dashboard; the badge clears
 automatically when the prerequisite closes. Clear with `--depends ""`.
+
+### Ready-work view (`ready`)
+
+`ready` lists open, non-standing items that are not snoozed and have **no
+active blockers** — "what can be worked on right now". Same sort as `list`
+(deadline, then priority). The dashboard has a matching **Ready** view tab.
+Supports `--section`, `--limit`, `--json`.
+
+### Claiming (`claim <id> [--by NAME]`)
+
+Atomically sets `status_tag` to `IN PROGRESS` (and the owner, if unset) inside
+a write-locked transaction; exits non-zero if the item is already
+`IN PROGRESS`, so two concurrent sessions cannot both pick up the same item.
+`--by` defaults to the current username. A dated `claimed by NAME` note is
+appended to the status log; claiming a blocked item warns but succeeds.
+Release by setting the tag back: `update <id> --tag OPEN`.
+
+### Context priming (`prime`)
+
+`prime` emits a compact agent-ready snapshot: section slugs, counts (open /
+overdue / due ≤7d / ready / blocked / snoozed / standing), the overdue, ready,
+and blocked items (`--limit` rows per group, default 15), and the CLI
+conventions an agent must follow. Designed to be run once at session start
+instead of re-reading the docs and markdown exports.
 
 ### Status tags and deadlines from free text
 
@@ -263,9 +307,11 @@ CREATE TABLE items (
     priority     TEXT,          -- H / M / L or NULL
     wait_until   TEXT,          -- ISO YYYY-MM-DD; snooze hide-until date
     recur        TEXT,          -- recurrence rule (e.g. weekly, 2w, monthly)
-    depends_on   TEXT           -- comma-separated prerequisite item IDs
+    depends_on   TEXT,          -- comma-separated prerequisite item IDs
+    legacy_id    TEXT           -- pre-hash numeric id (set by migrate-ids); lookups fall back to it
 );
 CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER);  -- next_sort_id counter
+CREATE TABLE issued_ids (id TEXT PRIMARY KEY);            -- every hash id ever issued (never reused)
 ```
 
 Existing `action_items.db` files **upgrade automatically**: `open_db()` adds
@@ -281,6 +327,8 @@ own copy of `scripts/todo.py`:
 - **DB auto-migrates** on the next open (columns + `meta` table).
 - **Re-copy `todo.py`** from this repo into each sub-project's `scripts/` to
   pick up new flags and fixes.
+- After upgrading to the hash-id engine, run `migrate-ids` once per project
+  (optional but recommended — see "Migrating a pre-hash DB" above).
 - The hub's `rollup.py` guards every SELECT with column-existence checks, so a
   new hub safely aggregates a project still running an old engine.
 

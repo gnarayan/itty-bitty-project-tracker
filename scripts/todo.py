@@ -7,7 +7,10 @@ Subcommands:
   init    Create an empty action_items.db in the project root (run once at setup)
   list    [--all] [--owner] [--section S] [--status TAG] [--due-before DATE]
           [--standing] [--limit N] [--json]
+  ready   [--section S] [--limit N] [--json]   (open items with no active blockers)
   show    <id>
+  claim   <id> [--by NAME]   (atomically mark IN PROGRESS; fails if already claimed)
+  prime   [--limit N]        (agent-ready context dump: counts, ready/overdue, conventions)
   add     --section S --title "..." [--owner ...] [--deadline ...] [--recur RULE] [--depends ID[,ID]]
           [--status "..."|--status-file FILE]
   update  <id> [--title ...] [--owner ...] [--deadline ...] [--tag ...] [--recur RULE] [--depends ID[,ID]]
@@ -15,15 +18,23 @@ Subcommands:
   append  <id> [--text "..."|--text-file -]
   done    <id>
   archive <id>
+  migrate-ids   (one-time: numeric ids -> hash ids; old id kept as legacy_id)
   export  [--output FILE]   (default: action_items.md next to action_items.db)
+
+Ids are 4-char lowercase-hex hashes with at least one letter (e.g. a3f8) —
+collision-free across machines and never reused. Pre-migration numeric ids
+keep working everywhere via the legacy_id fallback.
 """
 import argparse
 import calendar
+import getpass
 import json
+import random
 import re
+import shutil
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # Pin stdin/stdout/stderr to UTF-8 regardless of the system locale.
@@ -308,6 +319,7 @@ _MIGRATIONS = [
     ("depends_on", "TEXT"),
     ("priority",   "TEXT"),
     ("wait_until", "TEXT"),
+    ("legacy_id",  "TEXT"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -331,6 +343,9 @@ def open_db():
             conn.execute(f"ALTER TABLE items ADD COLUMN {col} {col_type}")
     # meta table postdates the original schema (holds the monotone id counter).
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
+    # Registry of every hash id ever issued — closing an item deletes its row,
+    # so this is what preserves the never-reuse invariant for hash ids.
+    conn.execute("CREATE TABLE IF NOT EXISTS issued_ids (id TEXT PRIMARY KEY)")
     conn.commit()
     return conn
 
@@ -349,6 +364,61 @@ def _next_id(cur):
     cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_sort_id', ?)",
                 (nxt + 1,))
     return nxt
+
+
+_HASH_CHARS = "0123456789abcdef"
+
+
+def _new_hash_id(cur, length=4):
+    """Allocate a new collision-free hash id.  Must be called inside an open
+    BEGIN IMMEDIATE transaction.
+
+    Lowercase hex with at least one letter, so a hash id can never collide
+    with a legacy numeric id (in the DB, the archive, or prose references).
+    Registered in issued_ids so a closed item's id is never reissued."""
+    tries = 0
+    while True:
+        h = ''.join(random.choice(_HASH_CHARS) for _ in range(length))
+        tries += 1
+        if tries > 100:          # id space getting crowded — widen it
+            length += 1
+            tries = 0
+        if not any(c.isalpha() for c in h):
+            continue
+        cur.execute("SELECT 1 FROM issued_ids WHERE id = ?", (h,))
+        if cur.fetchone():
+            continue
+        cur.execute("SELECT 1 FROM items WHERE raw_id = ? OR legacy_id = ?", (h, h))
+        if cur.fetchone():
+            continue
+        cur.execute("INSERT INTO issued_ids (id) VALUES (?)", (h,))
+        return h
+
+
+def _resolve_item(cur, item_id):
+    """Fetch an item by raw_id, falling back to legacy_id (pre-hash numeric id).
+    Returns the row or None."""
+    cur.execute("SELECT * FROM items WHERE raw_id = ?", (item_id,))
+    row = cur.fetchone()
+    if row:
+        return row
+    cur.execute("SELECT * FROM items WHERE legacy_id = ?", (item_id,))
+    rows = cur.fetchall()
+    return rows[0] if len(rows) == 1 else None
+
+
+def _normalize_depends(cur, depends_str):
+    """Rewrite legacy numeric ids in a --depends list to their canonical raw_id.
+    Unknown ids pass through unchanged (dependencies are informational)."""
+    if not depends_str:
+        return depends_str
+    out = []
+    for tok in (x.strip() for x in depends_str.split(',')):
+        if not tok:
+            continue
+        row = _resolve_item(cur, tok)
+        out.append(row['raw_id'] if row else tok)
+    return ",".join(out)
 
 
 def read_status_arg(args):
@@ -447,15 +517,15 @@ def cmd_list(args):
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = f"""
-        SELECT raw_id, title, owner, deadline, status_emoji, status_tag, is_owner, section,
-               depends_on, recur, priority, wait_until
+        SELECT raw_id, legacy_id, title, owner, deadline, status_emoji, status_tag, is_owner,
+               section, depends_on, recur, priority, wait_until
         FROM items
         {where}
         ORDER BY
             CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END,
             CASE priority WHEN 'H' THEN 0 WHEN 'M' THEN 1 WHEN 'L' THEN 2 ELSE 3 END,
             is_owner DESC,
-            CAST(SUBSTR(raw_id, 1, INSTR(raw_id||'x','x')-1) AS INTEGER)
+            sort_id
         LIMIT ?
     """
     params.append(args.limit)
@@ -469,19 +539,33 @@ def cmd_list(args):
     conn.close()
 
     if args.json:
-        out = []
-        for r in rows:
-            d = dict(r)
-            dep_ids = [x.strip() for x in (d.get('depends_on') or '').split(',') if x.strip()]
-            d['blocked_by'] = [x for x in dep_ids if x in active_ids]
-            out.append(d)
-        print(json.dumps(out, indent=2))
+        print(json.dumps(_rows_json(rows, active_ids), indent=2))
         return
 
     if not rows:
         print("(no items)")
         return
 
+    _print_rows(rows, active_ids)
+    print(f"\n({len(rows)} items shown)")
+
+
+def _blocked_by(row, active_ids):
+    """Active (still-open) prerequisite ids for a row."""
+    dep_ids = [x.strip() for x in (row['depends_on'] or '').split(',') if x.strip()]
+    return [x for x in dep_ids if x in active_ids]
+
+
+def _rows_json(rows, active_ids):
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['blocked_by'] = _blocked_by(r, active_ids)
+        out.append(d)
+    return out
+
+
+def _print_rows(rows, active_ids):
     header = f"{'#':<6} {'Title':<55} {'Owner':<20} {'Deadline':<11} {'Status'}"
     print(header)
     print("-" * len(header))
@@ -494,12 +578,167 @@ def cmd_list(args):
         pri_str      = f" [{r['priority']}]" if r['priority'] else ""
         recur_str    = f"  🔁 {r['recur']}" if r['recur'] else ""
         snooze_str   = f"  💤 until {r['wait_until']}" if r['wait_until'] else ""
-        dep_ids      = [x.strip() for x in (r['depends_on'] or '').split(',') if x.strip()]
-        blocked_by   = [x for x in dep_ids if x in active_ids]
+        blocked_by   = _blocked_by(r, active_ids)
         blocked_str  = ("  🔒 blocked by: " + ", ".join(f"#{x}" for x in blocked_by)) if blocked_by else ""
         print(f"{marker}{r['raw_id']:<5} {title_short:<55} {owner_short:<20} {deadline:<11} {tag}{pri_str}{recur_str}{snooze_str}{blocked_str}")
 
-    print(f"\n({len(rows)} items shown)")
+
+# ---------------------------------------------------------------------------
+# ready
+# ---------------------------------------------------------------------------
+
+_READY_SELECT = """
+    SELECT raw_id, legacy_id, title, owner, deadline, status_emoji, status_tag, is_owner,
+           section, depends_on, recur, priority, wait_until
+    FROM items
+    {where}
+    ORDER BY
+        CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END,
+        CASE priority WHEN 'H' THEN 0 WHEN 'M' THEN 1 WHEN 'L' THEN 2 ELSE 3 END,
+        is_owner DESC,
+        sort_id
+"""
+
+
+def _fetch_ready(cur, today_iso, section=None):
+    """Open, non-standing, non-snoozed rows with no active blockers, plus active_ids."""
+    placeholders = ",".join("?" for _ in CLOSED_TAGS)
+    conditions = [f"status_tag NOT IN ({placeholders})",
+                  "is_standing = 0",
+                  "(wait_until IS NULL OR wait_until <= ?)"]
+    params = list(CLOSED_TAGS) + [today_iso]
+    if section:
+        conditions.append("section = ?")
+        params.append(section)
+    cur.execute(_READY_SELECT.format(where="WHERE " + " AND ".join(conditions)), params)
+    rows = cur.fetchall()
+    cur.execute("SELECT raw_id FROM items")
+    active_ids = {row[0] for row in cur.fetchall()}
+    return [r for r in rows if not _blocked_by(r, active_ids)], active_ids
+
+
+def cmd_ready(args):
+    conn = open_db()
+    cur  = conn.cursor()
+    ready, active_ids = _fetch_ready(cur, date.today().isoformat(), args.section)
+    conn.close()
+    ready = ready[:args.limit]
+
+    if args.json:
+        print(json.dumps(_rows_json(ready, active_ids), indent=2))
+        return
+
+    if not ready:
+        print("(no ready items)")
+        return
+
+    _print_rows(ready, active_ids)
+    print(f"\n({len(ready)} ready items — open, unblocked, not snoozed)")
+
+
+# ---------------------------------------------------------------------------
+# claim
+# ---------------------------------------------------------------------------
+
+def cmd_claim(args):
+    actor = args.by or getpass.getuser()
+    conn = open_db()
+    cur  = conn.cursor()
+    # Write lock before the read so two concurrent claims serialize: the loser
+    # re-reads the row after the winner commits and sees IN PROGRESS.
+    conn.execute("BEGIN IMMEDIATE")
+    row = _resolve_item(cur, args.id)
+    if not row:
+        conn.close()
+        sys.exit(f"No item with id '{args.id}'")
+    rid = row['raw_id']
+    if row['status_tag'] == 'IN PROGRESS':
+        holder = row['owner'] or 'unspecified'
+        conn.close()
+        sys.exit(f"Item #{rid} is already claimed / IN PROGRESS (owner: {holder}). "
+                 f"Release with: update {rid} --tag OPEN")
+
+    cur.execute("SELECT raw_id FROM items")
+    active_ids = {r[0] for r in cur.fetchall()}
+    blocked = _blocked_by(row, active_ids)
+
+    today      = date.today().isoformat()
+    new_detail = (row['status_detail'] or '').rstrip() + f"\n**{today}:** claimed by {actor}"
+    new_owner  = row['owner'] or actor
+    cur.execute("UPDATE items SET status_tag = 'IN PROGRESS', owner = ?, status_detail = ? "
+                "WHERE raw_id = ?", (new_owner, new_detail, rid))
+    conn.commit()
+    conn.close()
+    print(f"Claimed item #{rid} for {actor} (status IN PROGRESS)")
+    if blocked:
+        print("WARNING: item is blocked by: " + ", ".join(f"#{x}" for x in blocked),
+              file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# prime
+# ---------------------------------------------------------------------------
+
+PRIME_CONVENTIONS = """## Conventions (agent contract)
+- All writes go through scripts/todo.py — never edit action_items.md (auto-generated, overwritten).
+- Prefer `append <id> --text "..."` for status notes: non-destructive, auto-dated.
+- `done <id>` permanently deletes the row and archives it; recurring items respawn. `archive <id>` retires without respawn.
+- `claim <id> [--by NAME]` atomically marks IN PROGRESS; fails if already claimed. Release: `update <id> --tag OPEN`.
+- Prefer `list --json` / `ready --json` over parsing markdown."""
+
+
+def cmd_prime(args):
+    conn = open_db()
+    cur  = conn.cursor()
+    today_iso = date.today().isoformat()
+    week_iso  = (date.today() + timedelta(days=7)).isoformat()
+    placeholders = ",".join("?" for _ in CLOSED_TAGS)
+
+    def _count(where, params=()):
+        cur.execute(f"SELECT COUNT(*) FROM items WHERE {where}", params)
+        return cur.fetchone()[0]
+
+    open_where = f"status_tag NOT IN ({placeholders}) AND is_standing = 0"
+    # Overdue / due-soon counts exclude snoozed items so they match the tables below.
+    unsnoozed  = " AND (wait_until IS NULL OR wait_until <= ?)"
+    n_open     = _count(open_where, tuple(CLOSED_TAGS))
+    # deadline != '' guards against empty-string deadlines in DBs written by old engines
+    n_overdue  = _count(open_where + " AND deadline IS NOT NULL AND deadline != '' AND deadline < ?" + unsnoozed,
+                        (*CLOSED_TAGS, today_iso, today_iso))
+    n_due7     = _count(open_where + " AND deadline IS NOT NULL AND deadline != '' AND deadline >= ? AND deadline <= ?" + unsnoozed,
+                        (*CLOSED_TAGS, today_iso, week_iso, today_iso))
+    n_snoozed  = _count("wait_until IS NOT NULL AND wait_until > ?", (today_iso,))
+    n_standing = _count("is_standing = 1")
+
+    ready, active_ids = _fetch_ready(cur, today_iso)
+    cur.execute(_READY_SELECT.format(where=f"WHERE {open_where}"), tuple(CLOSED_TAGS))
+    open_rows = cur.fetchall()
+    blocked_rows = [r for r in open_rows if _blocked_by(r, active_ids)]
+    n_blocked = len(blocked_rows)
+    overdue_rows = [r for r in open_rows
+                    if r['deadline'] and r['deadline'] < today_iso
+                    and not (r['wait_until'] and r['wait_until'] > today_iso)]
+    conn.close()
+
+    print(f"# {PROJECT_TITLE} tracker — context ({today_iso})")
+    print(f"Engine: scripts/todo.py | DB: {DB_PATH.name}")
+    if SECTION_ORDER:
+        print("Sections: " + ", ".join(f"{slug} ({disp})" for slug, disp in SECTION_ORDER))
+    print(f"Counts: {n_open} open | {n_overdue} overdue | {n_due7} due ≤7d | "
+          f"{len(ready)} ready | {n_blocked} blocked | {n_snoozed} snoozed | {n_standing} standing")
+
+    if overdue_rows:
+        print(f"\n## Overdue ({len(overdue_rows)})")
+        _print_rows(overdue_rows[:args.limit], active_ids)
+    if ready:
+        print(f"\n## Ready now — open, unblocked, not snoozed (top {min(len(ready), args.limit)})")
+        _print_rows(ready[:args.limit], active_ids)
+    if blocked_rows:
+        print(f"\n## Blocked ({n_blocked})")
+        _print_rows(blocked_rows[:args.limit], active_ids)
+
+    print()
+    print(PRIME_CONVENTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -509,8 +748,7 @@ def cmd_list(args):
 def cmd_show(args):
     conn = open_db()
     cur  = conn.cursor()
-    cur.execute("SELECT * FROM items WHERE raw_id = ?", (args.id,))
-    row = cur.fetchone()
+    row = _resolve_item(cur, args.id)
     conn.close()
     if not row:
         sys.exit(f"No item with id '{args.id}'")
@@ -584,7 +822,9 @@ def cmd_add(args):
     # can claim the same sort_id between the counter read and INSERT.
     conn.execute("BEGIN IMMEDIATE")
     new_sort = _next_id(cur)
-    new_id   = str(new_sort)
+    new_id   = _new_hash_id(cur)
+    if depends_val:
+        depends_val = _normalize_depends(cur, depends_val)
 
     xp_tags = getattr(args, 'xp', None) or None
 
@@ -610,11 +850,11 @@ def cmd_add(args):
 def cmd_update(args):
     conn = open_db()
     cur  = conn.cursor()
-    cur.execute("SELECT * FROM items WHERE raw_id = ?", (args.id,))
-    row = cur.fetchone()
+    row = _resolve_item(cur, args.id)
     if not row:
         conn.close()
         sys.exit(f"No item with id '{args.id}'")
+    rid = row['raw_id']
 
     if args.deadline is not None:
         args.deadline = args.deadline.strip()
@@ -676,7 +916,7 @@ def cmd_update(args):
 
     depends_val = getattr(args, 'depends', None)
     if depends_val is not None:
-        updates['depends_on'] = depends_val or None
+        updates['depends_on'] = _normalize_depends(cur, depends_val) or None
 
     priority_val = getattr(args, 'priority', None)
     if priority_val is not None:
@@ -704,11 +944,11 @@ def cmd_update(args):
         return
 
     set_clause = ", ".join(f"{k} = ?" for k in updates)
-    vals = list(updates.values()) + [args.id]
+    vals = list(updates.values()) + [rid]
     cur.execute(f"UPDATE items SET {set_clause} WHERE raw_id = ?", vals)
     conn.commit()
     conn.close()
-    print(f"Updated item #{args.id} ({', '.join(updates.keys())})")
+    print(f"Updated item #{rid} ({', '.join(updates.keys())})")
 
 
 # ---------------------------------------------------------------------------
@@ -722,11 +962,11 @@ def cmd_append(args):
 
     conn = open_db()
     cur  = conn.cursor()
-    cur.execute("SELECT status_detail, title, deadline FROM items WHERE raw_id = ?", (args.id,))
-    row = cur.fetchone()
+    row = _resolve_item(cur, args.id)
     if not row:
         conn.close()
         sys.exit(f"No item with id '{args.id}'")
+    rid = row['raw_id']
 
     today      = date.today().isoformat()
     new_detail = (row['status_detail'] or '').rstrip() + f"\n**{today}:** {text}"
@@ -742,10 +982,10 @@ def cmd_append(args):
         UPDATE items
         SET status_detail=?, status_tag=?, deadline=?, status_emoji=?
         WHERE raw_id=?
-    """, (new_detail, tag, deadline, emoji, args.id))
+    """, (new_detail, tag, deadline, emoji, rid))
     conn.commit()
     conn.close()
-    print(f"Appended to item #{args.id}")
+    print(f"Appended to item #{rid}")
 
 
 # ---------------------------------------------------------------------------
@@ -755,11 +995,11 @@ def cmd_append(args):
 def cmd_done_archive(args, final_tag):
     conn = open_db()
     cur  = conn.cursor()
-    cur.execute("SELECT * FROM items WHERE raw_id = ?", (args.id,))
-    row = cur.fetchone()
+    row = _resolve_item(cur, args.id)
     if not row:
         conn.close()
         sys.exit(f"No item with id '{args.id}'")
+    rid = row['raw_id']
 
     today       = date.today().isoformat()
     status_text = row['status_detail'] or ''
@@ -790,10 +1030,10 @@ def cmd_done_archive(args, final_tag):
         archive_text += archive_row + "\n"
         ARCHIVE_PATH.write_text(archive_text, encoding='utf-8')
 
-    cur.execute("DELETE FROM items WHERE raw_id = ?", (args.id,))
+    cur.execute("DELETE FROM items WHERE raw_id = ?", (rid,))
     conn.commit()
     conn.close()
-    print(f"Item #{args.id} archived to {ARCHIVE_PATH.name}")
+    print(f"Item #{rid} archived to {ARCHIVE_PATH.name}")
 
     _export(MD_PATH)
     print(f"Regenerated {MD_PATH.name}")
@@ -805,7 +1045,7 @@ def cmd_done_archive(args, final_tag):
         cur2  = conn2.cursor()
         conn2.execute("BEGIN IMMEDIATE")
         new_sort = _next_id(cur2)
-        new_id   = str(new_sort)
+        new_id   = _new_hash_id(cur2)
         cur2.execute("""
             INSERT INTO items
             (raw_id, sort_id, section, title, owner, source_date, deadline,
@@ -820,6 +1060,63 @@ def cmd_done_archive(args, final_tag):
         conn2.commit()
         conn2.close()
         print(f"Recurring: next occurrence is #{new_id} (deadline {new_deadline})")
+
+
+# ---------------------------------------------------------------------------
+# migrate-ids
+# ---------------------------------------------------------------------------
+
+def cmd_migrate_ids(args):
+    """One-time conversion of legacy numeric raw_ids to hash ids.
+
+    The old id is preserved in legacy_id, so lookups, archive rows, and prose
+    references to the numeric id keep resolving.  depends_on lists across the
+    whole DB are rewritten to the new ids.  A timestamped backup of the DB is
+    written first."""
+    stamp  = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = DB_PATH.with_name(f"{DB_PATH.name}.bak-{stamp}")
+    shutil.copy2(DB_PATH, backup)
+
+    conn = open_db()
+    cur  = conn.cursor()
+    conn.execute("BEGIN IMMEDIATE")
+    cur.execute("SELECT raw_id, depends_on FROM items ORDER BY sort_id")
+    rows = cur.fetchall()
+
+    numeric = [r for r in rows if re.fullmatch(r'\d+', r['raw_id'])]
+    if not numeric:
+        conn.rollback()
+        conn.close()
+        backup.unlink()
+        print("Nothing to migrate — no numeric ids found.")
+        return
+
+    mapping = {}
+    for r in numeric:
+        mapping[r['raw_id']] = _new_hash_id(cur)
+    for old, new in mapping.items():
+        cur.execute("UPDATE items SET raw_id = ?, legacy_id = ? WHERE raw_id = ?",
+                    (new, old, old))
+    # Rewrite depends_on lists everywhere (blocked-by matching is on raw_id).
+    for r in rows:
+        deps = r['depends_on']
+        if not deps:
+            continue
+        toks    = [x.strip() for x in deps.split(',') if x.strip()]
+        new_deps = ",".join(mapping.get(t, t) for t in toks)
+        if new_deps != deps:
+            owner_id = mapping.get(r['raw_id'], r['raw_id'])
+            cur.execute("UPDATE items SET depends_on = ? WHERE raw_id = ?",
+                        (new_deps, owner_id))
+    conn.commit()
+    conn.close()
+
+    print(f"Backup: {backup.name}")
+    print(f"Migrated {len(mapping)} items to hash ids (old id kept as legacy_id):")
+    for old, new in mapping.items():
+        print(f"  #{old} -> #{new}")
+    _export(MD_PATH)
+    print(f"Regenerated {MD_PATH.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -862,8 +1159,7 @@ def _export(output_path):
 
     for slug, display in SECTION_ORDER:
         cur.execute(
-            "SELECT * FROM items WHERE section = ? ORDER BY sort_id,"
-            " CAST(SUBSTR(raw_id,1,INSTR(raw_id||'x','x')-1) AS INTEGER)",
+            "SELECT * FROM items WHERE section = ? ORDER BY sort_id",
             (slug,),
         )
         rows = cur.fetchall()
@@ -933,9 +1229,26 @@ def build_parser():
     pl.add_argument("--limit",      type=int, default=500, metavar="N")
     pl.add_argument("--json",       action="store_true", help="JSON output")
 
+    # ready
+    pr = sub.add_parser("ready", help="List open items with no active blockers (not snoozed, not standing)")
+    pr.add_argument("--section", metavar="SLUG", help="Filter by section slug")
+    pr.add_argument("--limit",   type=int, default=500, metavar="N")
+    pr.add_argument("--json",    action="store_true", help="JSON output")
+
     # show
     ps = sub.add_parser("show", help="Show full record for one item")
     ps.add_argument("id", metavar="ID")
+
+    # claim
+    pc = sub.add_parser("claim", help="Atomically mark an item IN PROGRESS (fails if already claimed)")
+    pc.add_argument("id",   metavar="ID")
+    pc.add_argument("--by", metavar="NAME", default=None,
+                    help="Claiming actor (default: current username)")
+
+    # prime
+    pp = sub.add_parser("prime", help="Emit agent-ready context: counts, overdue/ready/blocked items, conventions")
+    pp.add_argument("--limit", type=int, default=15, metavar="N",
+                    help="Max rows per section (default 15)")
 
     # add
     pa = sub.add_parser("add", help="Add a new item")
@@ -1000,6 +1313,10 @@ def build_parser():
     par = sub.add_parser("archive", help="Mark item ARCHIVED, archive it, regenerate MD")
     par.add_argument("id", metavar="ID")
 
+    # migrate-ids
+    sub.add_parser("migrate-ids",
+                   help="One-time: convert numeric ids to hash ids (old id kept as legacy_id; DB backed up first)")
+
     # export
     pe = sub.add_parser("export", help="Regenerate action_items.md from DB")
     pe.add_argument("--output", metavar="FILE", default=None,
@@ -1015,12 +1332,16 @@ def main():
     dispatch = {
         "init":    cmd_init,
         "list":    cmd_list,
+        "ready":   cmd_ready,
         "show":    cmd_show,
+        "claim":   cmd_claim,
+        "prime":   cmd_prime,
         "add":     cmd_add,
         "update":  cmd_update,
         "append":  cmd_append,
         "done":    lambda a: cmd_done_archive(a, "DONE"),
         "archive": lambda a: cmd_done_archive(a, "ARCHIVED"),
+        "migrate-ids": cmd_migrate_ids,
         "export":  cmd_export,
     }
     try:

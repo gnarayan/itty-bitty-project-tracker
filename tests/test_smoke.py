@@ -9,6 +9,7 @@ import concurrent.futures
 import contextlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -56,6 +57,14 @@ class _ProjectFixture(unittest.TestCase):
         r = self._run("init")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def _add(self, *args):
+        """Run add and return the generated hash id."""
+        r = self._run("add", *args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        m = re.search(r"#(\S+)", r.stdout)
+        self.assertIsNotNone(m, f"no id in add output: {r.stdout}")
+        return m.group(1)
+
 
 class TestInit(_ProjectFixture):
     def test_init_creates_db(self):
@@ -66,9 +75,10 @@ class TestInit(_ProjectFixture):
 class TestAdd(_ProjectFixture):
     def test_add_explicit_section(self):
         self._init()
-        r = self._run("add", "--section", "active", "--title", "Test task")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("#1", r.stdout)
+        iid = self._add("--section", "active", "--title", "Test task")
+        # hash id: lowercase hex, at least one letter (never collides with legacy numeric ids)
+        self.assertRegex(iid, r"^[0-9a-f]{4,}$")
+        self.assertTrue(any(c.isalpha() for c in iid), iid)
 
     def test_add_default_section(self):
         """--section omitted should default to the first SECTION_ORDER slug."""
@@ -89,16 +99,16 @@ class TestAdd(_ProjectFixture):
 class TestDone(_ProjectFixture):
     def test_done_removes_from_list(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Task to close")
-        r = self._run("done", "1")
+        iid = self._add("--section", "active", "--title", "Task to close")
+        r = self._run("done", iid)
         self.assertEqual(r.returncode, 0, r.stderr)
         r2 = self._run("list")
         self.assertNotIn("Task to close", r2.stdout)
 
     def test_done_writes_archive(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Archived task")
-        self._run("done", "1")
+        iid = self._add("--section", "active", "--title", "Archived task")
+        self._run("done", iid)
         archive = self.proj / "action_items_archive.md"
         self.assertTrue(archive.exists())
         self.assertIn("Archived task", archive.read_text())
@@ -107,7 +117,7 @@ class TestDone(_ProjectFixture):
 class TestUpdateDeadline(_ProjectFixture):
     """A bare --status update must not silently wipe an existing deadline."""
 
-    def _deadline_of(self, raw_id="1"):
+    def _deadline_of(self, raw_id):
         r = self._run("list", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         items = {it["raw_id"]: it for it in json.loads(r.stdout)}
@@ -117,56 +127,56 @@ class TestUpdateDeadline(_ProjectFixture):
     def test_status_update_preserves_existing_deadline(self):
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()
-        self._run("add", "--section", "active", "--title", "Has a deadline",
-                  "--deadline", soon)
-        self.assertEqual(self._deadline_of(), soon)
-        r = self._run("update", "1", "--status", "progress, no iso date in this text")
+        iid = self._add("--section", "active", "--title", "Has a deadline",
+                        "--deadline", soon)
+        self.assertEqual(self._deadline_of(iid), soon)
+        r = self._run("update", iid, "--status", "progress, no iso date in this text")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._deadline_of(), soon)
+        self.assertEqual(self._deadline_of(iid), soon)
 
     def test_status_update_sets_deadline_from_keyword(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "No deadline yet")
-        self.assertIsNone(self._deadline_of())
+        iid = self._add("--section", "active", "--title", "No deadline yet")
+        self.assertIsNone(self._deadline_of(iid))
         soon = (date.today() + timedelta(days=3)).isoformat()
-        r = self._run("update", "1", "--status", f"deadline: {soon}")
+        r = self._run("update", iid, "--status", f"deadline: {soon}")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._deadline_of(), soon)
+        self.assertEqual(self._deadline_of(iid), soon)
 
     def test_status_log_timestamps_are_not_mistaken_for_deadline(self):
         """Bare '**YYYY-MM-DD:** note' log-entry headers (this tracker's own
         status-log convention, also injected by `append`) must never be
         misread as a deadline."""
         self._init()
-        self._run("add", "--section", "active", "--title", "No real deadline")
-        self.assertIsNone(self._deadline_of())
-        r = self._run("update", "1", "--status",
+        iid = self._add("--section", "active", "--title", "No real deadline")
+        self.assertIsNone(self._deadline_of(iid))
+        r = self._run("update", iid, "--status",
                        "OPEN — status.\n**2026-06-30:** Abstract submitted.\n"
                        "**2026-07-07:** doc shared.")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIsNone(self._deadline_of())
+        self.assertIsNone(self._deadline_of(iid))
 
     def test_status_bold_callout_without_keyword_still_sets_deadline(self):
         """A genuine bolded deadline callout with no literal 'deadline'/'due'
         keyword should still be caught (the fallback isn't fully disabled)."""
         self._init()
-        self._run("add", "--section", "active", "--title", "Hard cutoff")
-        self.assertIsNone(self._deadline_of())
+        iid = self._add("--section", "active", "--title", "Hard cutoff")
+        self.assertIsNone(self._deadline_of(iid))
         soon = (date.today() + timedelta(days=3)).isoformat()
-        r = self._run("update", "1", "--status",
+        r = self._run("update", iid, "--status",
                        f"**Hard cutoff {soon} — no exceptions**")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._deadline_of(), soon)
+        self.assertEqual(self._deadline_of(iid), soon)
 
     def test_status_with_explicit_deadline_flag_wins(self):
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()
         later = (date.today() + timedelta(days=10)).isoformat()
-        self._run("add", "--section", "active", "--title", "Reschedule me",
-                  "--deadline", soon)
-        r = self._run("update", "1", "--status", "rescheduled", "--deadline", later)
+        iid = self._add("--section", "active", "--title", "Reschedule me",
+                        "--deadline", soon)
+        r = self._run("update", iid, "--status", "rescheduled", "--deadline", later)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._deadline_of(), later)
+        self.assertEqual(self._deadline_of(iid), later)
 
 
 class TestFingerprint(_ProjectFixture):
@@ -178,7 +188,7 @@ class TestFingerprint(_ProjectFixture):
         conn.row_factory = sqlite3.Row
         row = dict(conn.execute(
             "SELECT title, owner, deadline, section, status_tag, status_detail, xp_tags "
-            "FROM items WHERE raw_id='1'"
+            "FROM items"
         ).fetchone())
         conn.close()
         from rollup import item_fingerprint
@@ -462,7 +472,7 @@ class TestRecurrence(_ProjectFixture):
                       "--title", "Monthly standup",
                       "--deadline", soon, "--recur", "monthly")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("#1", r.stdout)
+        self.assertRegex(r.stdout, r"Added item #[0-9a-f]+")
 
     def test_recur_without_deadline_fails_cleanly(self):
         self._init()
@@ -485,9 +495,9 @@ class TestRecurrence(_ProjectFixture):
         self._init()
         # Use a past deadline so next_deadline must advance past today.
         past = (date.today() - timedelta(days=5)).isoformat()
-        self._run("add", "--section", "active",
-                  "--title", "Monthly mtg", "--deadline", past, "--recur", "monthly")
-        r = self._run("done", "1")
+        iid = self._add("--section", "active",
+                        "--title", "Monthly mtg", "--deadline", past, "--recur", "monthly")
+        r = self._run("done", iid)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Recurring", r.stdout)
 
@@ -503,9 +513,9 @@ class TestRecurrence(_ProjectFixture):
     def test_archive_does_not_respawn(self):
         self._init()
         soon = (date.today() + timedelta(days=5)).isoformat()
-        self._run("add", "--section", "active",
-                  "--title", "Recurring task", "--deadline", soon, "--recur", "weekly")
-        r = self._run("archive", "1")
+        iid = self._add("--section", "active",
+                        "--title", "Recurring task", "--deadline", soon, "--recur", "weekly")
+        r = self._run("archive", iid)
         self.assertEqual(r.returncode, 0, r.stderr)
         r2 = self._run("list", "--json")
         items = json.loads(r2.stdout)
@@ -537,9 +547,9 @@ class TestRecurrence(_ProjectFixture):
         """Marking a recurring item done before its deadline respawns with the NEXT deadline."""
         self._init()
         future = (date.today() + timedelta(days=10)).isoformat()
-        self._run("add", "--section", "active",
-                  "--title", "Future meeting", "--deadline", future, "--recur", "monthly")
-        self._run("done", "1")
+        iid = self._add("--section", "active",
+                        "--title", "Future meeting", "--deadline", future, "--recur", "monthly")
+        self._run("done", iid)
         r = self._run("list", "--json")
         items = json.loads(r.stdout)
         self.assertEqual(len(items), 1)
@@ -573,37 +583,37 @@ class TestDependencies(_ProjectFixture):
 
     def test_depends_add_succeeds(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Task A")
+        a = self._add("--section", "active", "--title", "Task A")
         r = self._run("add", "--section", "active", "--title", "Task B",
-                      "--depends", "1")
+                      "--depends", a)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("#2", r.stdout)
+        self.assertRegex(r.stdout, r"Added item #[0-9a-f]+")
 
     def test_blocked_shown_in_list(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Task A")
-        self._run("add", "--section", "active", "--title", "Task B", "--depends", "1")
+        a = self._add("--section", "active", "--title", "Task A")
+        self._run("add", "--section", "active", "--title", "Task B", "--depends", a)
         r = self._run("list")
         self.assertIn("blocked by", r.stdout)
-        self.assertIn("#1", r.stdout)
+        self.assertIn(f"#{a}", r.stdout)
 
     def test_unblocked_after_prerequisite_done(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Prereq")
-        self._run("add", "--section", "active", "--title", "Downstream", "--depends", "1")
-        self._run("done", "1")
+        a = self._add("--section", "active", "--title", "Prereq")
+        self._run("add", "--section", "active", "--title", "Downstream", "--depends", a)
+        self._run("done", a)
         r = self._run("list")
         self.assertNotIn("blocked by", r.stdout)
 
     def test_blocked_in_json_output(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "A")
-        self._run("add", "--section", "active", "--title", "B", "--depends", "1")
+        a = self._add("--section", "active", "--title", "A")
+        self._run("add", "--section", "active", "--title", "B", "--depends", a)
         r = self._run("list", "--json")
         items = json.loads(r.stdout)
         b = next(i for i in items if i["title"] == "B")
         self.assertIn("blocked_by", b)
-        self.assertIn("1", b["blocked_by"])
+        self.assertIn(a, b["blocked_by"])
 
     def test_rollup_html_shows_blocked_badge(self):
         hub = Path(self.tmp) / "hub"
@@ -621,9 +631,9 @@ class TestDependencies(_ProjectFixture):
                        cwd=str(hub), capture_output=True)
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()
-        self._run("add", "--section", "active", "--title", "Prereq task", "--deadline", soon)
+        prereq = self._add("--section", "active", "--title", "Prereq task", "--deadline", soon)
         self._run("add", "--section", "active", "--title", "[XP] Blocked task",
-                  "--deadline", soon, "--depends", "1")
+                  "--deadline", soon, "--depends", prereq)
 
         r = subprocess.run(
             [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
@@ -671,7 +681,7 @@ class TestPriority(_ProjectFixture):
         self._init()
         r = self._run("add", "--section", "active", "--title", "Urgent task", "--priority", "H")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("#1", r.stdout)
+        self.assertRegex(r.stdout, r"Added item #[0-9a-f]+")
 
     def test_invalid_priority_fails_cleanly(self):
         self._init()
@@ -709,8 +719,8 @@ class TestPriority(_ProjectFixture):
 
     def test_priority_cleared_by_update(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Task", "--priority", "H")
-        self._run("update", "1", "--priority", "")
+        iid = self._add("--section", "active", "--title", "Task", "--priority", "H")
+        self._run("update", iid, "--priority", "")
         r = self._run("list")
         self.assertNotIn("[H]", r.stdout)
 
@@ -776,10 +786,10 @@ class TestSnooze(_ProjectFixture):
     def test_clearing_snooze_restores_visibility(self):
         self._init()
         future = (date.today() + timedelta(days=10)).isoformat()
-        self._run("add", "--section", "active", "--title", "Will show again", "--snooze", future)
+        iid = self._add("--section", "active", "--title", "Will show again", "--snooze", future)
         r1 = self._run("list")
         self.assertNotIn("Will show again", r1.stdout)
-        self._run("update", "1", "--snooze", "")
+        self._run("update", iid, "--snooze", "")
         r2 = self._run("list")
         self.assertIn("Will show again", r2.stdout)
 
@@ -924,8 +934,8 @@ class TestDashboardEmbedding(_HubFixture):
         """Embedded _fp must equal serve.py's live-row fingerprint (xp_tags set)."""
         hub, hub_scripts = self._make_hub()
         self._init()
-        self._run("add", "--section", "active", "--title", "XP tagged",
-                  "--xp", "OtherProj")
+        iid = self._add("--section", "active", "--title", "XP tagged",
+                        "--xp", "OtherProj")
         r = subprocess.run(
             [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
             cwd=str(hub), capture_output=True, text=True,
@@ -940,7 +950,7 @@ class TestDashboardEmbedding(_HubFixture):
         row = dict(conn.execute(
             "SELECT title, owner, deadline, section, status_tag, status_detail,"
             " xp_tags, recur, depends_on, priority, wait_until"
-            " FROM items WHERE raw_id='1'").fetchone())
+            " FROM items WHERE raw_id=?", (iid,)).fetchone())
         conn.close()
         self.assertEqual(page_fp, item_fingerprint(row))
 
@@ -987,8 +997,8 @@ class TestApiClearFields(_HubFixture):
         hub, hub_scripts = self._make_hub()
         self._init()
         future = (date.today() + timedelta(days=30)).isoformat()
-        self._run("add", "--section", "active", "--title", "Clear me",
-                  "--deadline", future, "--recur", "monthly", "--owner", "GN")
+        iid = self._add("--section", "active", "--title", "Clear me",
+                        "--deadline", future, "--recur", "monthly", "--owner", "GN")
 
         from rollup import item_fingerprint
         conn = sqlite3.connect(self.proj / "action_items.db")
@@ -996,7 +1006,7 @@ class TestApiClearFields(_HubFixture):
         row = dict(conn.execute(
             "SELECT title, owner, deadline, section, status_tag, status_detail,"
             " xp_tags, recur, depends_on, priority, wait_until"
-            " FROM items WHERE raw_id='1'").fetchone())
+            " FROM items WHERE raw_id=?", (iid,)).fetchone())
         conn.close()
         base_fp = item_fingerprint(row)
 
@@ -1017,7 +1027,7 @@ class TestApiClearFields(_HubFixture):
             else:
                 self.fail("server did not become ready")
 
-            payload = {"project": "proj", "id": "1", "base_fp": base_fp,
+            payload = {"project": "proj", "id": iid, "base_fp": base_fp,
                        "section": "active", "title": "Clear me",
                        "owner": "GN", "deadline": "", "recur": "",
                        "depends_on": "", "priority": "", "wait_until": "",
@@ -1032,7 +1042,7 @@ class TestApiClearFields(_HubFixture):
 
             conn = sqlite3.connect(self.proj / "action_items.db")
             deadline, recur = conn.execute(
-                "SELECT deadline, recur FROM items WHERE raw_id='1'").fetchone()
+                "SELECT deadline, recur FROM items WHERE raw_id=?", (iid,)).fetchone()
             conn.close()
             self.assertIsNone(deadline)   # NULL, not ''
             self.assertIsNone(recur)
@@ -1046,11 +1056,11 @@ class TestDeadlineValidation(_ProjectFixture):
     def test_update_deadline_empty_clears_to_null(self):
         self._init()
         future = (date.today() + timedelta(days=5)).isoformat()
-        self._run("add", "--section", "active", "--title", "Dated", "--deadline", future)
-        r = self._run("update", "1", "--deadline", "")
+        iid = self._add("--section", "active", "--title", "Dated", "--deadline", future)
+        r = self._run("update", iid, "--deadline", "")
         self.assertEqual(r.returncode, 0, r.stderr)
         conn = sqlite3.connect(self.proj / "action_items.db")
-        deadline = conn.execute("SELECT deadline FROM items WHERE raw_id='1'").fetchone()[0]
+        deadline = conn.execute("SELECT deadline FROM items WHERE raw_id=?", (iid,)).fetchone()[0]
         conn.close()
         self.assertIsNone(deadline)
 
@@ -1064,53 +1074,61 @@ class TestDeadlineValidation(_ProjectFixture):
 
     def test_update_invalid_deadline_fails_cleanly(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Item")
-        r = self._run("update", "1", "--deadline", "2026-13-45")
+        iid = self._add("--section", "active", "--title", "Item")
+        r = self._run("update", iid, "--deadline", "2026-13-45")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("expected YYYY-MM-DD", r.stderr)
 
 
 class TestIdReuse(_ProjectFixture):
-    def test_id_not_reused_after_closing_highest_item(self):
+    def test_id_not_reused_after_closing_item(self):
+        """A closed item's hash id stays in issued_ids so it can never be reissued."""
         self._init()
-        self._run("add", "--section", "active", "--title", "First")   # 1
-        self._run("add", "--section", "active", "--title", "Second")  # 2
-        self._run("done", "2")
-        r = self._run("add", "--section", "active", "--title", "Third")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("#3", r.stdout, "closed item's id must not be recycled")
+        self._add("--section", "active", "--title", "First")
+        second = self._add("--section", "active", "--title", "Second")
+        self._run("done", second)
+        third = self._add("--section", "active", "--title", "Third")
+        self.assertNotEqual(third, second, "closed item's id must not be recycled")
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        issued = {r[0] for r in conn.execute("SELECT id FROM issued_ids").fetchall()}
+        conn.close()
+        self.assertIn(second, issued, "closed id must stay registered as issued")
 
-    def test_respawn_id_monotone(self):
+    def test_respawn_gets_fresh_id(self):
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()
-        self._run("add", "--section", "active", "--title", "Weekly",
-                  "--deadline", soon, "--recur", "weekly")           # 1
-        r = self._run("done", "1")
+        iid = self._add("--section", "active", "--title", "Weekly",
+                        "--deadline", soon, "--recur", "weekly")
+        r = self._run("done", iid)
         self.assertEqual(r.returncode, 0, r.stderr)
         items = json.loads(self._run("list", "--json").stdout)
-        self.assertEqual([i["raw_id"] for i in items], ["2"])
+        self.assertEqual(len(items), 1)
+        self.assertNotEqual(items[0]["raw_id"], iid)
 
     def test_pre_meta_db_seeds_counter_from_max_sort_id(self):
-        """A DB created before the meta table gets a correct seeded counter."""
+        """A DB created before the meta table gets a correct seeded sort counter."""
         self._init()
-        self._run("add", "--section", "active", "--title", "Legacy")
+        self._add("--section", "active", "--title", "Legacy")
         conn = sqlite3.connect(self.proj / "action_items.db")
         conn.execute("DELETE FROM meta")   # simulate a pre-counter DB
         conn.commit()
         conn.close()
         r = self._run("add", "--section", "active", "--title", "Post-migration")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("#2", r.stdout)
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        sort_ids = sorted(r[0] for r in conn.execute("SELECT sort_id FROM items").fetchall())
+        conn.close()
+        self.assertEqual(sort_ids, [1, 2])
 
 
 class TestRespawnPriority(_ProjectFixture):
     def test_respawn_preserves_priority(self):
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()
-        self._run("add", "--section", "active", "--title", "Weekly report",
-                  "--deadline", soon, "--recur", "weekly", "--priority", "H")
-        self._run("done", "1")
+        iid = self._add("--section", "active", "--title", "Weekly report",
+                        "--deadline", soon, "--recur", "weekly", "--priority", "H")
+        self._run("done", iid)
         items = json.loads(self._run("list", "--json").stdout)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["priority"], "H")
@@ -1119,8 +1137,8 @@ class TestRespawnPriority(_ProjectFixture):
 class TestClosedTagWarning(_ProjectFixture):
     def test_update_to_closed_tag_warns(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Zombie candidate")
-        r = self._run("update", "1", "--tag", "DONE")
+        iid = self._add("--section", "active", "--title", "Zombie candidate")
+        r = self._run("update", iid, "--tag", "DONE")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("WARNING", r.stderr)
         self.assertIn("done", r.stderr)
@@ -1162,13 +1180,185 @@ class TestClosedTagQuoting(_ProjectFixture):
 class TestDonePrefix(_ProjectFixture):
     def test_bold_done_prefix_not_duplicated_in_archive(self):
         self._init()
-        self._run("add", "--section", "active", "--title", "Pre-marked",
-                  "--status", "**DONE 2026-01-01** — wrapped up earlier")
-        r = self._run("done", "1")
+        iid = self._add("--section", "active", "--title", "Pre-marked",
+                        "--status", "**DONE 2026-01-01** — wrapped up earlier")
+        r = self._run("done", iid)
         self.assertEqual(r.returncode, 0, r.stderr)
         archive = (self.proj / "action_items_archive.md").read_text()
         row = next(l for l in archive.splitlines() if "Pre-marked" in l)
         self.assertEqual(row.count("DONE"), 1, f"double prefix in: {row}")
+
+
+class TestReady(_ProjectFixture):
+    def _seed(self):
+        self._init()
+        self.id_a = self._add("--section", "active", "--title", "Unblocked A",
+                              "--deadline", (date.today() + timedelta(days=5)).isoformat())
+        self.id_b = self._add("--section", "active", "--title", "Blocked B",
+                              "--depends", self.id_a)
+        self.id_c = self._add("--section", "active", "--title", "Snoozed C",
+                              "--snooze", (date.today() + timedelta(days=30)).isoformat())
+
+    def test_ready_excludes_blocked_and_snoozed(self):
+        self._seed()
+        r = self._run("ready", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ids = [it["raw_id"] for it in json.loads(r.stdout)]
+        self.assertEqual(ids, [self.id_a])
+
+    def test_ready_includes_item_after_blocker_done(self):
+        self._seed()
+        self._run("done", self.id_a)
+        r = self._run("ready", "--json")
+        ids = [it["raw_id"] for it in json.loads(r.stdout)]
+        self.assertIn(self.id_b, ids)
+
+    def test_ready_excludes_standing(self):
+        self._init()
+        self._run("add", "--section", "backlog", "--title", "Standing item")
+        r = self._run("ready")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Standing item", r.stdout)
+
+
+class TestClaim(_ProjectFixture):
+    def test_claim_sets_in_progress_and_owner(self):
+        self._init()
+        iid = self._add("--section", "active", "--title", "Claimable")
+        r = self._run("claim", iid, "--by", "agent-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        items = {it["raw_id"]: it for it in json.loads(self._run("list", "--json").stdout)}
+        self.assertEqual(items[iid]["status_tag"], "IN PROGRESS")
+        self.assertEqual(items[iid]["owner"], "agent-1")
+
+    def test_second_claim_fails(self):
+        self._init()
+        iid = self._add("--section", "active", "--title", "Contended")
+        self._run("claim", iid, "--by", "agent-1")
+        r = self._run("claim", iid, "--by", "agent-2")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already claimed", r.stderr)
+
+    def test_claim_preserves_existing_owner(self):
+        self._init()
+        iid = self._add("--section", "active", "--title", "Owned", "--owner", "Alice")
+        self._run("claim", iid, "--by", "agent-1")
+        items = {it["raw_id"]: it for it in json.loads(self._run("list", "--json").stdout)}
+        self.assertEqual(items[iid]["owner"], "Alice")
+
+    def test_release_then_reclaim(self):
+        self._init()
+        iid = self._add("--section", "active", "--title", "Recycled")
+        self._run("claim", iid, "--by", "agent-1")
+        self._run("update", iid, "--tag", "OPEN")
+        r = self._run("claim", iid, "--by", "agent-2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestPrime(_ProjectFixture):
+    def test_prime_counts_and_sections(self):
+        self._init()
+        first = self._add("--section", "active", "--title", "Overdue item",
+                          "--deadline", (date.today() - timedelta(days=2)).isoformat())
+        self._run("add", "--section", "active", "--title", "Blocked item", "--depends", first)
+        r = self._run("prime")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("2 open", r.stdout)
+        self.assertIn("1 overdue", r.stdout)
+        self.assertIn("1 ready", r.stdout)
+        self.assertIn("1 blocked", r.stdout)
+        self.assertIn("## Overdue", r.stdout)
+        self.assertIn("## Conventions", r.stdout)
+
+    def test_prime_on_empty_db(self):
+        self._init()
+        r = self._run("prime")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("0 open", r.stdout)
+
+
+class TestDashboardReadyView(_HubFixture):
+    def test_html_has_ready_view(self):
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        self._run("add", "--section", "active", "--title", "Ready view seed")
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        self.assertIn("{id:'ready',label:'Ready'}", html)
+        self.assertIn("case 'ready'", html)
+
+
+class TestMigrateIds(_ProjectFixture):
+    """migrate-ids: numeric raw_ids -> hash ids with legacy_id fallback."""
+
+    def _seed_legacy(self):
+        """Create items, then rewrite their ids to the pre-hash numeric scheme."""
+        self._init()
+        a = self._add("--section", "active", "--title", "Legacy A")
+        b = self._add("--section", "active", "--title", "Legacy B", "--depends", a)
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        conn.execute("UPDATE items SET raw_id='1' WHERE raw_id=?", (a,))
+        conn.execute("UPDATE items SET raw_id='2', depends_on='1' WHERE raw_id=?", (b,))
+        conn.commit()
+        conn.close()
+
+    def test_migrate_rewrites_ids_and_depends(self):
+        self._seed_legacy()
+        r = self._run("migrate-ids")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Migrated 2 items", r.stdout)
+        items = json.loads(self._run("list", "--json").stdout)
+        by_title = {i["title"]: i for i in items}
+        new_a = by_title["Legacy A"]
+        new_b = by_title["Legacy B"]
+        for it in (new_a, new_b):
+            self.assertRegex(it["raw_id"], r"^[0-9a-f]+$")
+            self.assertTrue(any(c.isalpha() for c in it["raw_id"]))
+        self.assertEqual(new_a["legacy_id"], "1")
+        self.assertEqual(new_b["legacy_id"], "2")
+        self.assertEqual(new_b["depends_on"], new_a["raw_id"])
+        self.assertEqual(new_b["blocked_by"], [new_a["raw_id"]])
+
+    def test_migrate_writes_backup(self):
+        self._seed_legacy()
+        self._run("migrate-ids")
+        backups = list(self.proj.glob("action_items.db.bak-*"))
+        self.assertEqual(len(backups), 1)
+
+    def test_legacy_id_lookup_still_works(self):
+        self._seed_legacy()
+        self._run("migrate-ids")
+        r = self._run("show", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Legacy A", r.stdout)
+        r = self._run("update", "2", "--priority", "H")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self._run("done", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self._run("list", "--json")
+        titles = [i["title"] for i in json.loads(r.stdout)]
+        self.assertNotIn("Legacy A", titles)
+
+    def test_migrate_noop_on_hash_only_db(self):
+        self._init()
+        self._add("--section", "active", "--title", "Already hashed")
+        r = self._run("migrate-ids")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Nothing to migrate", r.stdout)
+        self.assertEqual(list(self.proj.glob("action_items.db.bak-*")), [])
+
+    def test_depends_on_legacy_id_normalized_at_write(self):
+        self._seed_legacy()
+        self._run("migrate-ids")
+        items = {i["title"]: i for i in json.loads(self._run("list", "--json").stdout)}
+        new_c = self._add("--section", "active", "--title", "New C", "--depends", "1")
+        c = json.loads(self._run("list", "--json").stdout)
+        c_item = next(i for i in c if i["title"] == "New C")
+        self.assertEqual(c_item["depends_on"], items["Legacy A"]["raw_id"])
 
 
 if __name__ == "__main__":
