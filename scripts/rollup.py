@@ -986,6 +986,29 @@ __PROJECTS_META_JSON__
     return out + esc(text.slice(i));
   }
 
+  function hlNode(root, q) {
+    // Highlight matches inside already-rendered HTML (e.g. mdLite output)
+    // by wrapping text nodes only — never touches tags or attributes.
+    if (!q) return;
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var nodes = [], n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    nodes.forEach(function(node) {
+      var text = node.nodeValue, lower = text.toLowerCase();
+      if (lower.indexOf(q) < 0) return;
+      var frag = document.createDocumentFragment(), i = 0, idx;
+      while ((idx = lower.indexOf(q, i)) >= 0) {
+        frag.appendChild(document.createTextNode(text.slice(i, idx)));
+        var m = document.createElement('mark');
+        m.textContent = text.slice(idx, idx + q.length);
+        frag.appendChild(m);
+        i = idx + q.length;
+      }
+      frag.appendChild(document.createTextNode(text.slice(i)));
+      node.parentNode.replaceChild(frag, node);
+    });
+  }
+
   // Minimal safe markdown for status text: escape first, then render
   // [text](http…) links, **bold**, and `code`. Newlines are handled by the
   // detail cell's white-space: pre-wrap.
@@ -1316,6 +1339,7 @@ __PROJECTS_META_JSON__
         if (hasDetail) {
           var dr = document.createElement('tr'); dr.className='detail-row'; dr.id=detailId;
           dr.innerHTML = '<td colspan="6">' + mdLite(item.status_detail) + '</td>';
+          hlNode(dr, hq);
           tbody.appendChild(dr);
         }
         rowIdx++;
