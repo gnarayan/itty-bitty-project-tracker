@@ -100,8 +100,10 @@ python3 scripts/todo.py done a3f8                     # close + archive (irrever
 ```
 
 Item ids are short hashes (`a3f8`) — collision-free across machines and never
-reused. Older DBs with numeric ids: run `migrate-ids` once (the old numeric
-ids keep working afterwards; [details](REFERENCE.md#migrating-a-pre-hash-db-migrate-ids)).
+reused — and every item also has a stable numeric alias (`Project#12` style,
+its `sort_id`) accepted by all lookups and dashboard search. Older DBs with
+numeric ids: run `migrate-ids` once (the old numeric ids keep working
+afterwards; [details](REFERENCE.md#migrating-a-pre-hash-db-migrate-ids)).
 
 Useful extras, one flag each: `--priority H|M|L`, `--snooze YYYY-MM-DD`,
 `--recur weekly|2w|monthly|…` (respawns on `done`), `--depends 3,7`,

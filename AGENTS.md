@@ -28,9 +28,11 @@ directory that uses this tracker. Full flag reference: [REFERENCE.md](REFERENCE.
    mean to replace the whole status.
 8. **Prefer the CLI over reading `action_items.md`**: `list` output is a
    compact table ~20× smaller with the same information.
-9. **Ids are short hashes** (e.g. `a3f8`), never reused. Old numeric ids from
-   before the hash migration still resolve everywhere (`legacy_id` fallback) —
-   but always cite the hash id from `list` output in new notes and `--depends`.
+9. **Ids are short hashes** (e.g. `a3f8`), never reused. Every item also has a
+   stable numeric alias (`sort_id`, shown in `show`/`--json` — it continues the
+   pre-hash numbering), and both resolve in all lookups and dashboard ref
+   search. The hash is canonical and always unambiguous; prefer it in
+   `--depends` and notes, but `Project#N` numeric refs are fine.
 
 ---
 

@@ -208,7 +208,7 @@ def fetch_master_items(cutoff_date_str):
     wait_col   = ", wait_until" if has_wait   else ""
     leg_col    = ", legacy_id"  if _has_column(conn, "items", "legacy_id") else ""
     cur.execute(f"""
-        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
+        SELECT raw_id, sort_id, section, title, owner, deadline, status_tag, status_detail,
                is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}{leg_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
@@ -254,7 +254,7 @@ def fetch_project_items(label, db_path, cutoff_date_str):
     xp_cond   = "OR (xp_tags IS NOT NULL AND xp_tags != '')" if has_xp else ""
     pri_cond  = "OR (priority = 'H')" if has_pri else ""
     cur.execute(f"""
-        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
+        SELECT raw_id, sort_id, section, title, owner, deadline, status_tag, status_detail,
                is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}{leg_col}
         FROM items
         WHERE status_tag NOT IN ({closed})
@@ -304,7 +304,7 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
     wait_col  = ", wait_until" if has_wait   else ""
     leg_col   = ", legacy_id"  if _has_column(conn, "items", "legacy_id") else ""
     cur.execute(f"""
-        SELECT raw_id, section, title, owner, deadline, status_tag, status_detail,
+        SELECT raw_id, sort_id, section, title, owner, deadline, status_tag, status_detail,
                is_standing{xp_col}{recur_col}{deps_col}{pri_col}{wait_col}{leg_col}
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
@@ -962,6 +962,12 @@ __PROJECTS_META_JSON__
     return (item._project === 'Master' ? 'priorities' : item._project) + '#' + item.legacy_id;
   }
 
+  function numRefLabel(item) {
+    // Stable numeric alias: sort_id continues the pre-hash numbering.
+    if (item.sort_id == null) return '';
+    return (item._project === 'Master' ? 'priorities' : item._project) + '#' + item.sort_id;
+  }
+
   function esc(s) {
     return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
@@ -1017,7 +1023,8 @@ __PROJECTS_META_JSON__
                (item.status_tag || '').toLowerCase().indexOf(q) < 0 &&
                (item.status_detail || '').toLowerCase().indexOf(q) < 0 &&
                refLabel(item).toLowerCase().indexOf(q) < 0 &&
-               legacyRefLabel(item).toLowerCase().indexOf(q) < 0) return false;
+               legacyRefLabel(item).toLowerCase().indexOf(q) < 0 &&
+               numRefLabel(item).toLowerCase().indexOf(q) < 0) return false;
       return true;
     });
   }

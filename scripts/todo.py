@@ -396,15 +396,26 @@ def _new_hash_id(cur, length=4):
 
 
 def _resolve_item(cur, item_id):
-    """Fetch an item by raw_id, falling back to legacy_id (pre-hash numeric id).
-    Returns the row or None."""
+    """Fetch an item by raw_id, falling back to legacy_id, then sort_id.
+
+    sort_id is the stable numeric alias: it continues the pre-hash numbering
+    (for migrated rows legacy_id == sort_id), so Project#N refs keep working
+    for items created after the hash migration.  Returns None on no match or
+    an ambiguous numeric alias — the hash id is always the unambiguous path."""
     cur.execute("SELECT * FROM items WHERE raw_id = ?", (item_id,))
     row = cur.fetchone()
     if row:
         return row
     cur.execute("SELECT * FROM items WHERE legacy_id = ?", (item_id,))
     rows = cur.fetchall()
-    return rows[0] if len(rows) == 1 else None
+    if len(rows) == 1:
+        return rows[0]
+    if not rows and re.fullmatch(r'\d+', str(item_id)):
+        cur.execute("SELECT * FROM items WHERE sort_id = ?", (int(item_id),))
+        rows = cur.fetchall()
+        if len(rows) == 1:
+            return rows[0]
+    return None
 
 
 def _normalize_depends(cur, depends_str):
@@ -517,8 +528,8 @@ def cmd_list(args):
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = f"""
-        SELECT raw_id, legacy_id, title, owner, deadline, status_emoji, status_tag, is_owner,
-               section, depends_on, recur, priority, wait_until
+        SELECT raw_id, legacy_id, sort_id, title, owner, deadline, status_emoji, status_tag,
+               is_owner, section, depends_on, recur, priority, wait_until
         FROM items
         {where}
         ORDER BY
@@ -588,8 +599,8 @@ def _print_rows(rows, active_ids):
 # ---------------------------------------------------------------------------
 
 _READY_SELECT = """
-    SELECT raw_id, legacy_id, title, owner, deadline, status_emoji, status_tag, is_owner,
-           section, depends_on, recur, priority, wait_until
+    SELECT raw_id, legacy_id, sort_id, title, owner, deadline, status_emoji, status_tag,
+           is_owner, section, depends_on, recur, priority, wait_until
     FROM items
     {where}
     ORDER BY

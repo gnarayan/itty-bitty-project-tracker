@@ -97,6 +97,15 @@ an item keeps its id registered in `issued_ids`, so archive rows and
 `--depends` references stay unambiguous. Since a hash always contains a
 letter, it can never collide with a pre-hash numeric id.
 
+Every item also carries a **stable numeric alias**: its `sort_id`, which
+continues the pre-hash numbering (allocation-ordered, monotone, never
+reused; for migrated rows it equals the old numeric id). All id lookups and
+the dashboard ref search accept it, so `Project#153`-style numeric refs keep
+working for items created after the hash migration. The hash remains
+canonical: if a numeric alias ever becomes ambiguous (possible only after a
+multi-machine merge), lookups refuse it rather than guess — use the hash.
+`sort_id` appears in `show` and `--json` output.
+
 ### Migrating a pre-hash DB (`migrate-ids`)
 
 DBs created before hash ids hold numeric ids (`1`, `2`, …). Run

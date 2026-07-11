@@ -1361,5 +1361,56 @@ class TestMigrateIds(_ProjectFixture):
         self.assertEqual(c_item["depends_on"], items["Legacy A"]["raw_id"])
 
 
+class TestSortIdAlias(_ProjectFixture):
+    """sort_id continues the pre-hash numbering as a stable numeric alias."""
+
+    def _sort_id_of(self, iid):
+        items = {i["raw_id"]: i for i in json.loads(self._run("list", "--json").stdout)}
+        return items[iid]["sort_id"]
+
+    def test_new_item_resolvable_by_sort_id(self):
+        self._init()
+        iid = self._add("--section", "active", "--title", "Aliased item")
+        sid = self._sort_id_of(iid)
+        r = self._run("show", str(sid))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Aliased item", r.stdout)
+        r = self._run("done", str(sid))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Aliased item", self._run("list").stdout)
+
+    def test_sort_ids_continue_monotone(self):
+        self._init()
+        a = self._add("--section", "active", "--title", "First")
+        b = self._add("--section", "active", "--title", "Second")
+        self.assertEqual(self._sort_id_of(b), self._sort_id_of(a) + 1)
+
+    def test_hash_lookup_wins_over_numeric(self):
+        """A raw_id/legacy match must take precedence over the sort_id alias."""
+        self._init()
+        iid = self._add("--section", "active", "--title", "Precedence")
+        sid = self._sort_id_of(iid)
+        r = self._run("show", iid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"sort_id       : {sid}", r.stdout)
+
+
+class TestDashboardNumRef(_HubFixture):
+    def test_html_embeds_sort_id_and_num_ref_search(self):
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        self._run("add", "--section", "active", "--title", "Num ref seed")
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        self.assertIn("function numRefLabel", html)
+        items = self._embedded_items(html)
+        seed = next(i for i in items if i["title"] == "Num ref seed")
+        self.assertIsInstance(seed["sort_id"], int)
+
+
 if __name__ == "__main__":
     unittest.main()
