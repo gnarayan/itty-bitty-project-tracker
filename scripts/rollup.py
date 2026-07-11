@@ -983,6 +983,9 @@ __PROJECTS_META_JSON__
     var s = overSt    !== undefined ? overSt    : state.statuses;
     var v = overView  !== undefined ? overView  : state.view;
     var q = state.search ? state.search.toLowerCase() : '';
+    // A query containing '#' is a ref lookup (e.g. "DESC#12") — search across
+    // every view so the ref is found even when snoozed or outside the window.
+    var refQ = q.indexOf('#') >= 0;
     return items.filter(function(item) {
       // view
       var vOk;
@@ -994,15 +997,16 @@ __PROJECTS_META_JSON__
         case 'snoozed':  vOk = !!(item.wait_until && item.wait_until > TODAY); break;
         default:         vOk = true;
       }
-      if (!vOk) return false;
+      if (!vOk && !refQ) return false;
       // project (multi, OR)
       if (!itemInProjects(item, p)) return false;
       // status (multi, OR)
       if (s.size && !s.has(item.status_tag || 'OPEN')) return false;
-      // search
+      // search (title, status, notes, and the cross-project ref label)
       if (q && (item.title || '').toLowerCase().indexOf(q) < 0 &&
                (item.status_tag || '').toLowerCase().indexOf(q) < 0 &&
-               (item.status_detail || '').toLowerCase().indexOf(q) < 0) return false;
+               (item.status_detail || '').toLowerCase().indexOf(q) < 0 &&
+               refLabel(item).toLowerCase().indexOf(q) < 0) return false;
       return true;
     });
   }
@@ -1094,7 +1098,7 @@ __PROJECTS_META_JSON__
 
   // Search
   var sw = document.createElement('div'); sw.className = 'search-wrap';
-  var si = document.createElement('input'); si.type='text'; si.id='search-input'; si.placeholder='Search…';
+  var si = document.createElement('input'); si.type='text'; si.id='search-input'; si.placeholder='Search text or ref…';
   var sc = document.createElement('button'); sc.className='search-clear'; sc.textContent='✕'; sc.title='Clear'; sc.setAttribute('aria-label', 'Clear search');
   sw.appendChild(si); sw.appendChild(sc); toolbar.appendChild(sw);
   si.oninput = function() { state.search = this.value; sc.style.display = this.value?'block':'none'; render(); };
