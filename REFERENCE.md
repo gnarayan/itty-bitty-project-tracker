@@ -232,9 +232,13 @@ without touching an existing deadline.
 `dashboard.html` is a single self-contained file: open it straight from disk
 for a read-only view, or run the server (`tracker up`) for live editing.
 
-- **Search** matches title, status, notes, and the cross-project **ref**
-  (`ProjectA#12`, `priorities#3`). A query containing `#` searches across all
+- **Search** matches title, status, notes, and the cross-project **ref** —
+  both the hash ref (`ProjectA#a3f8`) and the stable numeric alias
+  (`ProjectA#12`), by substring. A query containing `#` searches across all
   views, so a ref resolves even if the item is snoozed or outside the window.
+  Matched text is highlighted in the title, project, status, and ref cells,
+  so you can see whether `ProjectA#3` hit the numeric ref `#31` or the hash
+  ref `#38b3`.
 - **Markdown** in status notes renders in the expanded detail row: `**bold**`,
   `` `code` ``, and `[text](https://…)` links. Raw HTML stays escaped.
 - **Views**: Surfaced / Overdue / Due Soon / Blocked / Snoozed / All, plus

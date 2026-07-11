@@ -576,6 +576,8 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       border: 1px solid #b8d8b8; white-space: nowrap;
     }
     [data-theme="dark"] .recur-badge { background: #1a3021; color: #81c784; border-color: #2e5437; }
+    mark { background: #ffe08a; color: inherit; padding: 0 1px; border-radius: 2px; }
+    [data-theme="dark"] mark { background: #7a5d16; }
     .blocked-badge {
       display: inline-block; padding: 1px 5px; border-radius: 8px; margin-left: 4px;
       font-size: 10px; font-weight: 600; background: #fde8e8; color: #c62828;
@@ -972,6 +974,18 @@ __PROJECTS_META_JSON__
     return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  function hl(text, q) {
+    // Escape-safe highlight of every case-insensitive match of q in text.
+    text = text || '';
+    if (!q) return esc(text);
+    var lower = text.toLowerCase(), out = '', i = 0, idx;
+    while ((idx = lower.indexOf(q, i)) >= 0) {
+      out += esc(text.slice(i, idx)) + '<mark>' + esc(text.slice(idx, idx + q.length)) + '</mark>';
+      i = idx + q.length;
+    }
+    return out + esc(text.slice(i));
+  }
+
   // Minimal safe markdown for status text: escape first, then render
   // [text](http…) links, **bold**, and `code`. Newlines are handled by the
   // detail cell's white-space: pre-wrap.
@@ -1019,12 +1033,18 @@ __PROJECTS_META_JSON__
       // status (multi, OR)
       if (s.size && !s.has(item.status_tag || 'OPEN')) return false;
       // search (title, status, notes, and the cross-project ref label)
-      if (q && (item.title || '').toLowerCase().indexOf(q) < 0 &&
-               (item.status_tag || '').toLowerCase().indexOf(q) < 0 &&
-               (item.status_detail || '').toLowerCase().indexOf(q) < 0 &&
-               refLabel(item).toLowerCase().indexOf(q) < 0 &&
-               legacyRefLabel(item).toLowerCase().indexOf(q) < 0 &&
-               numRefLabel(item).toLowerCase().indexOf(q) < 0) return false;
+      if (q) {
+        var textHit = (item.title || '').toLowerCase().indexOf(q) >= 0 ||
+                      (item.status_tag || '').toLowerCase().indexOf(q) >= 0 ||
+                      (item.status_detail || '').toLowerCase().indexOf(q) >= 0;
+        // Refs match by substring in BOTH namespaces — "scimma#3" hits the
+        // numeric refs #3/#31 and the hash ref SCIMMA#38b3 alike; the row
+        // highlighting (hl()) shows which label matched.
+        var refHit = refLabel(item).toLowerCase().indexOf(q) >= 0 ||
+                     legacyRefLabel(item).toLowerCase().indexOf(q) >= 0 ||
+                     numRefLabel(item).toLowerCase().indexOf(q) >= 0;
+        if (!textHit && !refHit) return false;
+      }
       return true;
     });
   }
@@ -1226,6 +1246,7 @@ __PROJECTS_META_JSON__
       }
       grp.items.forEach(function(item) {
         var dc = dlClass(item.deadline), dl = item.deadline || '—', ref = refLabel(item);
+        var hq = (state.search || '').toLowerCase();
         var hasDetail = !!(item.status_detail && item.status_detail.trim());
         var detailId = 'detail-' + rowIdx;
 
@@ -1260,14 +1281,14 @@ __PROJECTS_META_JSON__
         if (hasDetail) { tr.setAttribute('tabindex', '0'); tr.setAttribute('aria-expanded', 'false'); }
         tr.innerHTML =
           '<td class="deadline-cell">' + esc(dl) + '</td>' +
-          '<td><span class="proj-badge">' + esc(numRefLabel(item) || item._project) + '</span>' + xpHtml + '</td>' +
-          '<td class="title-cell"><span class="title-text">' + esc(item.title||'') + '</span>' +
+          '<td><span class="proj-badge">' + hl(numRefLabel(item) || item._project, hq) + '</span>' + xpHtml + '</td>' +
+          '<td class="title-cell"><span class="title-text">' + hl(item.title||'', hq) + '</span>' +
             recurHtml + blockedHtml + snoozeHtml +
             (hasDetail ? '<span class="expand-icon" aria-hidden="true">&#9660;</span>' : '') +
             '<span class="edit-btn" role="button" tabindex="0" aria-label="Edit task" title="Edit task">✎</span>' + '</td>' +
           '<td>' + priHtml + '</td>' +
-          '<td><span class="status-tag">' + esc(item.status_tag||'') + '</span></td>' +
-          '<td class="ref-cell">' + esc(ref) + '</td>';
+          '<td><span class="status-tag">' + hl(item.status_tag||'', hq) + '</span></td>' +
+          '<td class="ref-cell">' + hl(ref, hq) + '</td>';
 
         if (hasDetail) {
           var toggleDetail = (function(row, did) {

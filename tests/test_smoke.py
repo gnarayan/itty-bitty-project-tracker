@@ -1407,8 +1407,10 @@ class TestDashboardNumRef(_HubFixture):
         self.assertEqual(r.returncode, 0, r.stderr)
         html = (hub / "dashboard.html").read_text()
         self.assertIn("function numRefLabel", html)
-        # project column shows the numeric ref (falls back to bare project name)
-        self.assertIn("esc(numRefLabel(item) || item._project)", html)
+        # project column shows the numeric ref (falls back to bare project name),
+        # highlighted via hl() when it matches the search query
+        self.assertIn("hl(numRefLabel(item) || item._project, hq)", html)
+        self.assertIn("function hl(", html)
         items = self._embedded_items(html)
         seed = next(i for i in items if i["title"] == "Num ref seed")
         self.assertIsInstance(seed["sort_id"], int)
