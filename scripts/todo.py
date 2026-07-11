@@ -133,11 +133,13 @@ def extract_status_tag(text, keywords=None):
     if keywords is None:
         keywords = STATUS_KEYWORDS
     clean = re.sub(r'\*\*', '', text).strip().upper()
+    # Word-boundary matches only: a bare substring test would close items whose
+    # prose merely contains a tag ("PRESENTATION" ⊃ SENT, "WITHHELD" ⊃ HELD).
     for kw in keywords:
-        if clean.startswith(kw):
+        if re.match(rf'{re.escape(kw)}\b', clean):
             return kw
     for kw in keywords:
-        if kw in clean[:60]:
+        if re.search(rf'\b{re.escape(kw)}\b', clean[:60]):
             return kw
     return "OPEN"
 
@@ -292,6 +294,10 @@ CREATE INDEX IF NOT EXISTS idx_status   ON items(status_tag);
 CREATE INDEX IF NOT EXISTS idx_section  ON items(section);
 CREATE INDEX IF NOT EXISTS idx_owner    ON items(is_owner);
 CREATE INDEX IF NOT EXISTS idx_deadline ON items(deadline);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value INTEGER
+);
 """
 
 # Columns added after the initial schema.  open_db() applies these automatically
@@ -323,8 +329,26 @@ def open_db():
     for col, col_type in _MIGRATIONS:
         if col not in existing:
             conn.execute(f"ALTER TABLE items ADD COLUMN {col} {col_type}")
+    # meta table postdates the original schema (holds the monotone id counter).
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
     conn.commit()
     return conn
+
+
+def _next_id(cur):
+    """Allocate the next item id monotonically — never reuses the id of a
+    closed (deleted) item, so archive rows and depends_on references stay
+    unambiguous.  Must be called inside an open BEGIN IMMEDIATE transaction.
+
+    Seeds from MAX(sort_id) on DBs that predate the meta counter."""
+    cur.execute("SELECT value FROM meta WHERE key = 'next_sort_id'")
+    row = cur.fetchone()
+    cur.execute("SELECT MAX(sort_id) FROM items")
+    max_sort = cur.fetchone()[0] or 0
+    nxt = max(row[0] if row else 0, max_sort + 1)
+    cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_sort_id', ?)",
+                (nxt + 1,))
+    return nxt
 
 
 def read_status_arg(args):
@@ -392,8 +416,9 @@ def cmd_list(args):
         conditions.append("wait_until IS NOT NULL AND wait_until > ?")
         params.append(today_iso)
     elif not args.all and not args.standing:
-        closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
-        conditions.append(f"status_tag NOT IN ({closed})")
+        placeholders = ",".join("?" for _ in CLOSED_TAGS)
+        conditions.append(f"status_tag NOT IN ({placeholders})")
+        params.extend(CLOSED_TAGS)
         conditions.append("is_standing = 0")
         # Hide snoozed items (wait_until in the future)
         conditions.append("(wait_until IS NULL OR wait_until <= ?)")
@@ -413,8 +438,11 @@ def cmd_list(args):
         conditions.append("deadline IS NOT NULL AND deadline <= ?")
         params.append(args.due_before)
     if getattr(args, 'search', None):
-        term = f"%{args.search}%"
-        conditions.append("(title LIKE ? OR status_detail LIKE ? OR status_tag LIKE ?)")
+        # Escape LIKE wildcards so a literal % or _ in the search term matches itself.
+        escaped = re.sub(r'([\\%_])', r'\\\1', args.search)
+        term = f"%{escaped}%"
+        conditions.append("(title LIKE ? ESCAPE '\\' OR status_detail LIKE ? ESCAPE '\\'"
+                          " OR status_tag LIKE ? ESCAPE '\\')")
         params += [term, term, term]
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
@@ -509,6 +537,14 @@ def cmd_add(args):
         valid = ", ".join(SECTION_SLUGS)
         sys.exit(f"Unknown section '{args.section}'. Valid: {valid}")
 
+    if args.deadline is not None:
+        args.deadline = args.deadline.strip() or None
+        if args.deadline:
+            try:
+                _valid_iso_date(args.deadline)
+            except ValueError as e:
+                sys.exit(str(e))
+
     status_text = read_status_arg(args) or "OPEN"
     tag, deadline, emoji, _ = derive_fields(status_text, args.title, args.tag, args.deadline)
     owner_flag  = 1 if is_owner_item(args.title) else 0
@@ -545,11 +581,9 @@ def cmd_add(args):
     conn = open_db()
     cur  = conn.cursor()
     # Acquire write lock before computing new ID so no concurrent CLI add
-    # can claim the same sort_id between our SELECT MAX and INSERT.
+    # can claim the same sort_id between the counter read and INSERT.
     conn.execute("BEGIN IMMEDIATE")
-    cur.execute("SELECT MAX(sort_id) FROM items")
-    max_sort = cur.fetchone()[0] or 0
-    new_sort = max_sort + 1
+    new_sort = _next_id(cur)
     new_id   = str(new_sort)
 
     xp_tags = getattr(args, 'xp', None) or None
@@ -582,6 +616,15 @@ def cmd_update(args):
         conn.close()
         sys.exit(f"No item with id '{args.id}'")
 
+    if args.deadline is not None:
+        args.deadline = args.deadline.strip()
+        if args.deadline:
+            try:
+                _valid_iso_date(args.deadline)
+            except ValueError as e:
+                conn.close()
+                sys.exit(str(e))
+
     updates = {}
 
     new_status = read_status_arg(args)
@@ -598,9 +641,14 @@ def cmd_update(args):
     if args.owner is not None:
         updates['owner'] = args.owner
     if args.deadline is not None:
-        updates['deadline'] = args.deadline
+        updates['deadline'] = args.deadline or None   # '' clears to NULL
     if args.tag is not None:
         updates['status_tag'] = args.tag.upper()
+        if updates['status_tag'] in CLOSED_TAGS:
+            print(f"WARNING: {updates['status_tag']!r} is a closed tag — the item stays in the "
+                  f"DB (hidden from list/rollup but still exported to markdown). "
+                  f"Use 'done' or 'archive' to close and archive it properly.",
+                  file=sys.stderr)
     if args.section is not None:
         if args.section not in SLUG_TO_DISPLAY:
             conn.close()
@@ -620,7 +668,7 @@ def cmd_update(args):
             except ValueError as e:
                 conn.close()
                 sys.exit(str(e))
-            new_deadline = updates.get('deadline') or row['deadline']
+            new_deadline = updates['deadline'] if 'deadline' in updates else row['deadline']
             if not new_deadline:
                 conn.close()
                 sys.exit("--recur requires a deadline (use --deadline to set one)")
@@ -715,7 +763,8 @@ def cmd_done_archive(args, final_tag):
 
     today       = date.today().isoformat()
     status_text = row['status_detail'] or ''
-    if not status_text.upper().startswith(final_tag):
+    # Strip bold markers before the prefix check so "**DONE …" isn't double-prefixed.
+    if not re.sub(r'\*\*', '', status_text).strip().upper().startswith(final_tag):
         status_text = f"**{final_tag} {today}** — {status_text}"
 
     # Capture fields needed for possible respawn before the row is deleted.
@@ -723,6 +772,7 @@ def cmd_done_archive(args, final_tag):
     row_deadline   = row['deadline']
     row_depends_on = row['depends_on'] if 'depends_on' in row.keys() else None
     row_xp_tags    = row['xp_tags']   if 'xp_tags'    in row.keys() else None
+    row_priority   = row['priority']  if 'priority'   in row.keys() else None
 
     archive_row = (
         f"| {row['raw_id']} | {row['title']} | {row['owner'] or ''} "
@@ -735,8 +785,10 @@ def cmd_done_archive(args, final_tag):
         archive_text  = archive_text.rstrip('\n') + "\n\n## Archived via CLI\n\n"
         archive_text += "| # | Action | Owner(s) | Source date | Status |\n"
         archive_text += "|---|--------|----------|-------------|--------|\n"
-    archive_text += archive_row + "\n"
-    ARCHIVE_PATH.write_text(archive_text, encoding='utf-8')
+    # Idempotent append: a retry after a failed DB delete must not duplicate the row.
+    if archive_row not in archive_text:
+        archive_text += archive_row + "\n"
+        ARCHIVE_PATH.write_text(archive_text, encoding='utf-8')
 
     cur.execute("DELETE FROM items WHERE raw_id = ?", (args.id,))
     conn.commit()
@@ -752,21 +804,19 @@ def cmd_done_archive(args, final_tag):
         conn2 = open_db()
         cur2  = conn2.cursor()
         conn2.execute("BEGIN IMMEDIATE")
-        cur2.execute("SELECT MAX(sort_id) FROM items")
-        max_sort = cur2.fetchone()[0] or 0
-        new_sort = max_sort + 1
+        new_sort = _next_id(cur2)
         new_id   = str(new_sort)
         cur2.execute("""
             INSERT INTO items
             (raw_id, sort_id, section, title, owner, source_date, deadline,
              status_tag, status_emoji, is_owner, is_standing, status_detail,
-             xp_tags, recur, depends_on)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             xp_tags, recur, depends_on, priority)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (new_id, new_sort,
               row['section'], row['title'], row['owner'] or '',
               today, new_deadline,
               'OPEN', '', row['is_owner'], row['is_standing'], 'OPEN',
-              row_xp_tags, row_recur, row_depends_on))
+              row_xp_tags, row_recur, row_depends_on, row_priority))
         conn2.commit()
         conn2.close()
         print(f"Recurring: next occurrence is #{new_id} (deadline {new_deadline})")

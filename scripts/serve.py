@@ -278,6 +278,11 @@ def _validate_and_add(payload):
     if not title:
         return 400, {"ok": False, "error": "title is required"}
 
+    if deadline:
+        err = _validate_iso_date(deadline)
+        if err:
+            return 400, {"ok": False, "error": err}
+
     if recur:
         err = _validate_recur(recur)
         if err:
@@ -341,19 +346,27 @@ def _validate_and_update(payload):
     base_fp    = (payload.get("base_fp")    or "").strip()
     section    = (payload.get("section")    or "").strip() or None
     title      = (payload.get("title")      or "").strip() or None
-    owner      = payload.get("owner")       # may be None to clear
-    deadline   = payload.get("deadline")    # may be None to clear
+    # Clear semantics: "" means clear the field; absent/None means don't touch.
+    # (The dashboard sends "" for cleared fields — JSON null would be
+    # indistinguishable from "field absent" here.)
+    owner      = payload.get("owner")
+    deadline   = payload.get("deadline")
     status_tag = (payload.get("status_tag") or "").strip().upper() or None
-    xp_tags    = payload.get("xp_tags")     # may be None to clear
-    recur      = payload.get("recur")       # may be None to clear
-    depends_on = payload.get("depends_on")  # may be None to clear
-    priority   = payload.get("priority")    # may be None to clear
-    wait_until = payload.get("wait_until")  # may be None to clear
+    xp_tags    = payload.get("xp_tags")
+    recur      = payload.get("recur")
+    depends_on = payload.get("depends_on")
+    priority   = payload.get("priority")
+    wait_until = payload.get("wait_until")
 
     if not raw_id:
         return 400, {"ok": False, "error": "id is required"}
     if title is not None and not title:
         return 400, {"ok": False, "error": "title cannot be empty"}
+
+    if deadline:
+        err = _validate_iso_date(deadline)
+        if err:
+            return 400, {"ok": False, "error": err}
 
     if recur:
         err = _validate_recur(recur)

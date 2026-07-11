@@ -195,7 +195,7 @@ def fetch_master_items(cutoff_date_str):
         sys.exit(f"Master DB not found: {DB_PATH}\nRun: python3 scripts/todo.py init")
     conn = open_ro(DB_PATH)
     cur  = conn.cursor()
-    closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
+    closed = ",".join("?" for _ in CLOSED_TAGS)
     has_xp     = _has_column(conn, "items", "xp_tags")
     has_recur  = _has_column(conn, "items", "recur")
     has_deps   = _has_column(conn, "items", "depends_on")
@@ -212,20 +212,24 @@ def fetch_master_items(cutoff_date_str):
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
-    """)
+    """, tuple(CLOSED_TAGS))
     rows = cur.fetchall()
     # Active IDs for blocked_by derivation (any row present = not closed)
     cur.execute("SELECT raw_id FROM items")
     active_ids = {row[0] for row in cur.fetchall()}
     conn.close()
+    today_iso = date.today().isoformat()
     result = []
     for r in rows:
         d = dict(r)
         d["_project"] = "Master"
         d["_db"] = str(DB_PATH)
-        d["_xp_tags"] = _parse_xp_tags(d.pop("xp_tags", None))
+        d["_xp_tags"] = _parse_xp_tags(d.get("xp_tags"))
         dep_ids = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
         d["blocked_by"] = [x for x in dep_ids if x in active_ids]
+        # Master items are otherwise unconditional, but snoozing must still hide them.
+        wait = d.get("wait_until") or ""
+        d["_surfaced"] = not (wait and wait > today_iso)
         result.append(d)
     return result
 
@@ -234,7 +238,7 @@ def fetch_project_items(label, db_path, cutoff_date_str):
     """Open items from a project DB that are [XP]-tagged, xp_tags-set, or within the window."""
     conn = open_ro(db_path)
     cur  = conn.cursor()
-    closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
+    closed = ",".join("?" for _ in CLOSED_TAGS)
     has_xp    = _has_column(conn, "items", "xp_tags")
     has_recur = _has_column(conn, "items", "recur")
     has_deps  = _has_column(conn, "items", "depends_on")
@@ -260,7 +264,7 @@ def fetch_project_items(label, db_path, cutoff_date_str):
             {pri_cond}
           )
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
-    """, (cutoff_date_str,))
+    """, (*CLOSED_TAGS, cutoff_date_str))
     rows = cur.fetchall()
     cur.execute("SELECT raw_id FROM items")
     active_ids = {row[0] for row in cur.fetchall()}
@@ -274,7 +278,7 @@ def fetch_project_items(label, db_path, cutoff_date_str):
             continue
         d["_project"] = label
         d["_db"] = str(db_path)
-        d["_xp_tags"] = _parse_xp_tags(d.pop("xp_tags", None))
+        d["_xp_tags"] = _parse_xp_tags(d.get("xp_tags"))
         dep_ids = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
         d["blocked_by"] = [x for x in dep_ids if x in active_ids]
         result.append(d)
@@ -285,7 +289,7 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
     """ALL open items from a project DB; sets _surfaced=True for rollup-eligible rows."""
     conn = open_ro(db_path)
     cur  = conn.cursor()
-    closed = ",".join(f"'{t}'" for t in CLOSED_TAGS)
+    closed = ",".join("?" for _ in CLOSED_TAGS)
     has_xp    = _has_column(conn, "items", "xp_tags")
     has_recur = _has_column(conn, "items", "recur")
     has_deps  = _has_column(conn, "items", "depends_on")
@@ -302,7 +306,7 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
         FROM items
         WHERE status_tag NOT IN ({closed}) AND is_standing = 0
         ORDER BY CASE WHEN deadline IS NULL THEN '9999' ELSE deadline END, sort_id
-    """)
+    """, tuple(CLOSED_TAGS))
     rows = cur.fetchall()
     cur.execute("SELECT raw_id FROM items")
     active_ids = {row[0] for row in cur.fetchall()}
@@ -315,7 +319,7 @@ def fetch_project_items_all(label, db_path, cutoff_date_str):
         deadline = d.get("deadline") or ""
         priority = d.get("priority") or ""
         wait     = d.get("wait_until") or ""
-        xp_tags  = _parse_xp_tags(d.pop("xp_tags", None))
+        xp_tags  = _parse_xp_tags(d.get("xp_tags"))
         dep_ids  = [x.strip() for x in (d.get("depends_on") or "").split(",") if x.strip()]
         d["_xp_tags"]   = xp_tags
         d["blocked_by"] = [x for x in dep_ids if x in active_ids]
@@ -603,6 +607,11 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     tr.detail-row td {
       padding: 6px 10px 14px 28px; font-size: 13px; color: var(--text-secondary);
       white-space: pre-wrap; background: var(--bg-detail); border-bottom: 1px solid var(--border-row);
+    }
+    tr.detail-row td a { color: var(--focus); }
+    tr.detail-row td code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+      background: var(--bg-badge); padding: 0 4px; border-radius: 4px;
     }
     .ref-cell { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
     tr.group-header { background: var(--bg-filter); }
@@ -923,7 +932,13 @@ __PROJECTS_META_JSON__
       if (typeof from.sort === 'object') { state.sort.key = from.sort.key || 'deadline'; state.sort.dir = from.sort.dir || 1; }
       else { var sp = from.sort.split(':'); state.sort.key = sp[0] || 'deadline'; state.sort.dir = parseInt(sp[1], 10) || 1; }
     }
-    if (from.theme) state.theme = from.theme;
+    // Theme lives only in localStorage (never in the URL hash), so read it
+    // regardless of which branch populated `from` — otherwise opening a link
+    // with a hash silently resets the theme.
+    try {
+      var ls = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+      if (ls.theme) state.theme = ls.theme;
+    } catch(e) {}
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -941,6 +956,18 @@ __PROJECTS_META_JSON__
 
   function esc(s) {
     return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // Minimal safe markdown for status text: escape first, then render
+  // [text](http…) links, **bold**, and `code`. Newlines are handled by the
+  // detail cell's white-space: pre-wrap.
+  function mdLite(s) {
+    var h = esc(s);
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)/g,
+                  '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+    return h;
   }
 
   function itemInProjects(item, projs) {
@@ -1245,7 +1272,7 @@ __PROJECTS_META_JSON__
 
         if (hasDetail) {
           var dr = document.createElement('tr'); dr.className='detail-row'; dr.id=detailId;
-          dr.innerHTML = '<td colspan="6">' + esc(item.status_detail) + '</td>';
+          dr.innerHTML = '<td colspan="6">' + mdLite(item.status_detail) + '</td>';
           tbody.appendChild(dr);
         }
         rowIdx++;
@@ -1324,15 +1351,15 @@ __PROJECTS_META_JSON__
     var cmd = '';
     if (payload.project !== 'Master') cmd += 'cd ' + dir + ' && ';
     cmd += 'python3 scripts/todo.py add';
-    cmd += ' --section ' + payload.section;
+    cmd += ' --section ' + JSON.stringify(payload.section);
     cmd += ' --title ' + JSON.stringify(payload.title);
     if (payload.owner)      cmd += ' --owner '   + JSON.stringify(payload.owner);
-    if (payload.deadline)   cmd += ' --deadline ' + payload.deadline;
+    if (payload.deadline)   cmd += ' --deadline ' + JSON.stringify(payload.deadline);
     if (payload.xp_tags)    cmd += ' --xp '       + JSON.stringify(payload.xp_tags);
     if (payload.recur)      cmd += ' --recur '    + JSON.stringify(payload.recur);
     if (payload.depends_on) cmd += ' --depends '  + JSON.stringify(payload.depends_on);
-    if (payload.priority)   cmd += ' --priority ' + payload.priority;
-    if (payload.wait_until) cmd += ' --snooze '   + payload.wait_until;
+    if (payload.priority)   cmd += ' --priority ' + JSON.stringify(payload.priority);
+    if (payload.wait_until) cmd += ' --snooze '   + JSON.stringify(payload.wait_until);
     return cmd;
   }
 
@@ -1455,11 +1482,12 @@ __PROJECTS_META_JSON__
     var prefix = (payload.project !== 'Master') ? 'cd ' + dir + ' && ' : '';
     var cmd = prefix + 'python3 scripts/todo.py update ' + payload.id;
     if (payload.title      !== undefined) cmd += ' --title '   + JSON.stringify(payload.title);
-    if (payload.owner      !== undefined) cmd += ' --owner '   + JSON.stringify(payload.owner);
-    if (payload.deadline   !== undefined) cmd += ' --deadline ' + payload.deadline;
-    if (payload.section    !== undefined) cmd += ' --section '  + payload.section;
-    if (payload.status_tag !== undefined) cmd += ' --tag '     + payload.status_tag;
-    if (payload.xp_tags    !== undefined) cmd += ' --xp '      + JSON.stringify(payload.xp_tags);
+    if (payload.owner      !== undefined) cmd += ' --owner '   + JSON.stringify(payload.owner || '');
+    if (payload.deadline   !== undefined) cmd += ' --deadline ' + JSON.stringify(payload.deadline || '');
+    if (payload.section    !== undefined) cmd += ' --section '  + JSON.stringify(payload.section || '');
+    if (payload.status_tag !== undefined && payload.status_tag !== null)
+                                          cmd += ' --tag '     + JSON.stringify(payload.status_tag);
+    if (payload.xp_tags    !== undefined) cmd += ' --xp '      + JSON.stringify(payload.xp_tags || '');
     if (payload.recur      !== undefined) cmd += ' --recur '    + JSON.stringify(payload.recur || '');
     if (payload.depends_on !== undefined) cmd += ' --depends '  + JSON.stringify(payload.depends_on || '');
     if (payload.priority   !== undefined) cmd += ' --priority ' + JSON.stringify(payload.priority || '');
@@ -1487,20 +1515,22 @@ __PROJECTS_META_JSON__
       return;
     }
 
+    // Clearable fields are sent as "" (not null): JSON null arrives server-side
+    // as "field absent" and is skipped, so null could never clear anything.
     var payload = {
       project:    item._project,
       id:         item.raw_id,
       base_fp:    item._fp,
       section:    editSection.value,
       title:      titleVal,
-      owner:      document.getElementById('edit-owner').value.trim() || null,
-      deadline:   document.getElementById('edit-deadline').value || null,
+      owner:      document.getElementById('edit-owner').value.trim(),
+      deadline:   document.getElementById('edit-deadline').value,
       status_tag: document.getElementById('edit-status-tag').value.trim() || null,
-      xp_tags:    document.getElementById('edit-xp').value.trim() || null,
-      recur:      document.getElementById('edit-recur').value.trim() || null,
-      depends_on: document.getElementById('edit-depends').value.trim() || null,
-      priority:   document.getElementById('edit-priority').value || null,
-      wait_until: document.getElementById('edit-snooze').value || null,
+      xp_tags:    document.getElementById('edit-xp').value.trim(),
+      recur:      document.getElementById('edit-recur').value.trim(),
+      depends_on: document.getElementById('edit-depends').value.trim(),
+      priority:   document.getElementById('edit-priority').value,
+      wait_until: document.getElementById('edit-snooze').value,
     };
 
     var endpoint = '/api/update';
@@ -1594,16 +1624,19 @@ def render_html(all_open_items, window_days, generated_date, today_iso):
             d["_xp_tags"] = []
         # Drop _db to keep the embedded JSON lean
         d.pop("_db", None)
-        # Fingerprint used by the browser for optimistic-concurrency on edits
+        # Fingerprint used by the browser for optimistic-concurrency on edits.
+        # Must include the raw xp_tags string so it matches the server-side
+        # recomputation in serve.py (_check_fingerprint hashes the live column).
         d["_fp"] = item_fingerprint(d)
+        d.pop("xp_tags", None)   # client uses the parsed _xp_tags list
         data.append(d)
 
-    data_json = json.dumps(data, ensure_ascii=False, default=str)
-    # Guard against </script> and <!-- sequences in embedded JSON
-    data_json = data_json.replace("</", "<\\/").replace("<!--", "<\\!--")
+    # Guard against </script> and <!-- sequences in embedded JSON by escaping
+    # every "<" as \\u003c — valid JSON, inert in HTML. (String-level tricks
+    # like "<\\!--" are NOT valid JSON escapes and would break JSON.parse.)
+    data_json = json.dumps(data, ensure_ascii=False, default=str).replace("<", "\\u003c")
 
-    meta_json = json.dumps(build_projects_meta(), ensure_ascii=False)
-    meta_json = meta_json.replace("</", "<\\/").replace("<!--", "<\\!--")
+    meta_json = json.dumps(build_projects_meta(), ensure_ascii=False).replace("<", "\\u003c")
 
     html = DASHBOARD_TEMPLATE
     html = html.replace("__TITLE__",              PROJECT_TITLE)
@@ -1648,12 +1681,10 @@ def main():
     cutoff = (today + timedelta(days=window)).isoformat()
 
     if args.html:
-        # HTML mode: embed ALL open items per project (for drill-down beyond the window)
-        master_items = fetch_master_items(cutoff)
-        for item in master_items:
-            item["_surfaced"] = True          # master items always surface
-
-        all_open = list(master_items)
+        # HTML mode: embed ALL open items per project (for drill-down beyond the window).
+        # Master items surface unconditionally except when snoozed
+        # (fetch_master_items sets _surfaced accordingly).
+        all_open = list(fetch_master_items(cutoff))
         n_projects = 0
         for label, tail in PROJECTS:
             db_path = resolve_project_db(tail)
@@ -1680,9 +1711,10 @@ def main():
         return
 
     # ---------------------------------------------------------------------------
-    # Markdown mode (default — unchanged behaviour)
+    # Markdown mode (default)
     # ---------------------------------------------------------------------------
-    all_items = fetch_master_items(cutoff)
+    # Snoozed master items are suppressed here, mirroring the project fetchers.
+    all_items = [i for i in fetch_master_items(cutoff) if i["_surfaced"]]
 
     for label, tail in PROJECTS:
         db_path = resolve_project_db(tail)

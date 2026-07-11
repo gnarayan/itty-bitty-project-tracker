@@ -856,5 +856,320 @@ class TestSearch(_ProjectFixture):
         self.assertEqual(items[0]["title"], "alpha task")
 
 
+class _HubFixture(_ProjectFixture):
+    """Project fixture plus a hub with rollup/serve registered against it."""
+
+    def _make_hub(self, extra_cfg=""):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        for f in ("todo.py", "rollup.py", "serve.py"):
+            shutil.copy(str(SCRIPTS / f), str(hub_scripts / f))
+        (hub_scripts / "tracker_config.py").write_text(
+            'PROJECT_TITLE = "Hub"\n'
+            'SECTION_ORDER = [("active", "Active")]\n'
+            'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}")]\n'
+            + extra_cfg
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"],
+                       cwd=str(hub), capture_output=True)
+        return hub, hub_scripts
+
+    @staticmethod
+    def _embedded_items(html):
+        """Parse the items-data JSON block out of a generated dashboard.html."""
+        blob = html.split('<script type="application/json" id="items-data">')[1]
+        blob = blob.split("</script>")[0]
+        return json.loads(blob)
+
+
+class TestStatusTagBoundary(_ProjectFixture):
+    """Keyword extraction must not match inside words (PRESENTATION ⊃ SENT)."""
+
+    def test_keyword_not_matched_inside_word(self):
+        from todo import extract_status_tag
+        self.assertEqual(
+            extract_status_tag("Abandoned plan awaiting revival", ["DONE"]), "OPEN")
+        self.assertEqual(
+            extract_status_tag("Presentation draft ready", ["SENT"]), "OPEN")
+
+    def test_keyword_still_matched_at_boundary(self):
+        from todo import extract_status_tag
+        self.assertEqual(extract_status_tag("SENT to panel", ["SENT"]), "SENT")
+        self.assertEqual(extract_status_tag("was sent yesterday", ["SENT"]), "SENT")
+        self.assertEqual(
+            extract_status_tag("**IN PROGRESS** since May", ["IN PROGRESS"]),
+            "IN PROGRESS")
+
+
+class TestDashboardEmbedding(_HubFixture):
+    def test_html_comment_in_status_keeps_json_parseable(self):
+        """A literal <!-- in status text must not break the embedded JSON."""
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        self._run("add", "--section", "active", "--title", "[XP] Banner quoter",
+                  "--status", "quoting <!-- AUTO-GENERATED --> and </script> too")
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        html = (hub / "dashboard.html").read_text()
+        items = self._embedded_items(html)   # raises if the JSON is invalid
+        detail = next(i for i in items if i["title"] == "[XP] Banner quoter")
+        self.assertIn("<!-- AUTO-GENERATED -->", detail["status_detail"])
+
+    def test_fingerprint_matches_server_recomputation_for_xp_item(self):
+        """Embedded _fp must equal serve.py's live-row fingerprint (xp_tags set)."""
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        self._run("add", "--section", "active", "--title", "XP tagged",
+                  "--xp", "OtherProj")
+        r = subprocess.run(
+            [sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+            cwd=str(hub), capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        items = self._embedded_items((hub / "dashboard.html").read_text())
+        page_fp = next(i for i in items if i["title"] == "XP tagged")["_fp"]
+
+        from rollup import item_fingerprint
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            "SELECT title, owner, deadline, section, status_tag, status_detail,"
+            " xp_tags, recur, depends_on, priority, wait_until"
+            " FROM items WHERE raw_id='1'").fetchone())
+        conn.close()
+        self.assertEqual(page_fp, item_fingerprint(row))
+
+    def test_dashboard_has_mdlite_and_theme_fix(self):
+        """Generated JS carries the markdown-lite renderer and the
+        localStorage theme read (behaviour itself is browser-side)."""
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        subprocess.run([sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+                       cwd=str(hub), capture_output=True, text=True)
+        html = (hub / "dashboard.html").read_text()
+        self.assertIn("function mdLite", html)
+        self.assertIn("mdLite(item.status_detail)", html)
+        self.assertIn("ls.theme", html)
+
+
+class TestMasterSnooze(_HubFixture):
+    def test_snoozed_master_item_suppressed(self):
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        future = (date.today() + timedelta(days=10)).isoformat()
+        subprocess.run(
+            [sys.executable, str(hub_scripts / "todo.py"), "add",
+             "--section", "active", "--title", "Snoozed master item",
+             "--snooze", future],
+            cwd=str(hub), capture_output=True, text=True)
+        # Markdown rollup: item must not appear
+        r = subprocess.run([sys.executable, str(hub_scripts / "rollup.py")],
+                           cwd=str(hub), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Snoozed master item",
+                         (hub / "MASTER_PRIORITIES.md").read_text())
+        # HTML rollup: present in the data but not surfaced
+        subprocess.run([sys.executable, str(hub_scripts / "rollup.py"), "--html"],
+                       cwd=str(hub), capture_output=True, text=True)
+        items = self._embedded_items((hub / "dashboard.html").read_text())
+        item = next(i for i in items if i["title"] == "Snoozed master item")
+        self.assertFalse(item["_surfaced"])
+
+
+class TestApiClearFields(_HubFixture):
+    def test_api_update_empty_string_clears_deadline_and_recur(self):
+        """'' from the edit modal must clear the field (was a silent no-op)."""
+        hub, hub_scripts = self._make_hub()
+        self._init()
+        future = (date.today() + timedelta(days=30)).isoformat()
+        self._run("add", "--section", "active", "--title", "Clear me",
+                  "--deadline", future, "--recur", "monthly", "--owner", "GN")
+
+        from rollup import item_fingerprint
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            "SELECT title, owner, deadline, section, status_tag, status_detail,"
+            " xp_tags, recur, depends_on, priority, wait_until"
+            " FROM items WHERE raw_id='1'").fetchone())
+        conn.close()
+        base_fp = item_fingerprint(row)
+
+        port = TestServe._free_port()
+        base = f"http://127.0.0.1:{port}"
+        server = subprocess.Popen(
+            [sys.executable, str(hub_scripts / "serve.py"),
+             "--port", str(port), "--no-browser"],
+            cwd=str(hub), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            for _ in range(50):
+                try:
+                    with urllib.request.urlopen(base + "/api/ping", timeout=1) as resp:
+                        if resp.status == 200:
+                            break
+                except Exception:
+                    time.sleep(0.1)
+            else:
+                self.fail("server did not become ready")
+
+            payload = {"project": "proj", "id": "1", "base_fp": base_fp,
+                       "section": "active", "title": "Clear me",
+                       "owner": "GN", "deadline": "", "recur": "",
+                       "depends_on": "", "priority": "", "wait_until": "",
+                       "xp_tags": "", "status_tag": None}
+            req = urllib.request.Request(base + "/api/update",
+                                         data=json.dumps(payload).encode(),
+                                         method="POST")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("X-Tracker", "1")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                self.assertTrue(json.load(resp).get("ok"))
+
+            conn = sqlite3.connect(self.proj / "action_items.db")
+            deadline, recur = conn.execute(
+                "SELECT deadline, recur FROM items WHERE raw_id='1'").fetchone()
+            conn.close()
+            self.assertIsNone(deadline)   # NULL, not ''
+            self.assertIsNone(recur)
+        finally:
+            server.terminate()
+            server.wait(timeout=5)
+            server.stdout.close()
+
+
+class TestDeadlineValidation(_ProjectFixture):
+    def test_update_deadline_empty_clears_to_null(self):
+        self._init()
+        future = (date.today() + timedelta(days=5)).isoformat()
+        self._run("add", "--section", "active", "--title", "Dated", "--deadline", future)
+        r = self._run("update", "1", "--deadline", "")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        deadline = conn.execute("SELECT deadline FROM items WHERE raw_id='1'").fetchone()[0]
+        conn.close()
+        self.assertIsNone(deadline)
+
+    def test_add_invalid_deadline_fails_cleanly(self):
+        self._init()
+        r = self._run("add", "--section", "active", "--title", "Bad date",
+                      "--deadline", "next tuesday")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("expected YYYY-MM-DD", r.stderr)
+
+    def test_update_invalid_deadline_fails_cleanly(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Item")
+        r = self._run("update", "1", "--deadline", "2026-13-45")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("expected YYYY-MM-DD", r.stderr)
+
+
+class TestIdReuse(_ProjectFixture):
+    def test_id_not_reused_after_closing_highest_item(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "First")   # 1
+        self._run("add", "--section", "active", "--title", "Second")  # 2
+        self._run("done", "2")
+        r = self._run("add", "--section", "active", "--title", "Third")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("#3", r.stdout, "closed item's id must not be recycled")
+
+    def test_respawn_id_monotone(self):
+        self._init()
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        self._run("add", "--section", "active", "--title", "Weekly",
+                  "--deadline", soon, "--recur", "weekly")           # 1
+        r = self._run("done", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        items = json.loads(self._run("list", "--json").stdout)
+        self.assertEqual([i["raw_id"] for i in items], ["2"])
+
+    def test_pre_meta_db_seeds_counter_from_max_sort_id(self):
+        """A DB created before the meta table gets a correct seeded counter."""
+        self._init()
+        self._run("add", "--section", "active", "--title", "Legacy")
+        conn = sqlite3.connect(self.proj / "action_items.db")
+        conn.execute("DELETE FROM meta")   # simulate a pre-counter DB
+        conn.commit()
+        conn.close()
+        r = self._run("add", "--section", "active", "--title", "Post-migration")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("#2", r.stdout)
+
+
+class TestRespawnPriority(_ProjectFixture):
+    def test_respawn_preserves_priority(self):
+        self._init()
+        soon = (date.today() + timedelta(days=3)).isoformat()
+        self._run("add", "--section", "active", "--title", "Weekly report",
+                  "--deadline", soon, "--recur", "weekly", "--priority", "H")
+        self._run("done", "1")
+        items = json.loads(self._run("list", "--json").stdout)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["priority"], "H")
+
+
+class TestClosedTagWarning(_ProjectFixture):
+    def test_update_to_closed_tag_warns(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Zombie candidate")
+        r = self._run("update", "1", "--tag", "DONE")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING", r.stderr)
+        self.assertIn("done", r.stderr)
+
+
+class TestSearchEscaping(_ProjectFixture):
+    def test_percent_is_literal_in_search(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "has % sign")
+        self._run("add", "--section", "active", "--title", "plain item")
+        r = self._run("list", "--search", "%")
+        self.assertIn("has % sign", r.stdout)
+        self.assertNotIn("plain item", r.stdout)
+
+    def test_underscore_is_literal_in_search(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "snake_case name")
+        self._run("add", "--section", "active", "--title", "abc")
+        r = self._run("list", "--search", "e_c")
+        self.assertIn("snake_case name", r.stdout)
+        self.assertNotIn("abc", r.stdout)
+
+
+class TestClosedTagQuoting(_ProjectFixture):
+    def test_closed_tag_with_apostrophe_does_not_break_queries(self):
+        (self.proj / "scripts" / "tracker_config.py").write_text(
+            'PROJECT_TITLE = "Smoke Test"\n'
+            'SECTION_ORDER = [("active", "Active"), ("backlog", "Backlog")]\n'
+            'STANDING_SLUG = "backlog"\n'
+            "CLOSED_TAGS = frozenset([\"DONE\", \"WON'T DO\"])\n"
+        )
+        self._init()
+        self._run("add", "--section", "active", "--title", "Alive item")
+        r = self._run("list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Alive item", r.stdout)
+
+
+class TestDonePrefix(_ProjectFixture):
+    def test_bold_done_prefix_not_duplicated_in_archive(self):
+        self._init()
+        self._run("add", "--section", "active", "--title", "Pre-marked",
+                  "--status", "**DONE 2026-01-01** — wrapped up earlier")
+        r = self._run("done", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        archive = (self.proj / "action_items_archive.md").read_text()
+        row = next(l for l in archive.splitlines() if "Pre-marked" in l)
+        self.assertEqual(row.count("DONE"), 1, f"double prefix in: {row}")
+
+
 if __name__ == "__main__":
     unittest.main()
