@@ -275,6 +275,11 @@ for a read-only view, or run the server (`tracker up`) for live editing.
 - **Regen-on-read**: when served, the dashboard regenerates automatically on
   the next page load after any write (API or CLI). Viewing the file directly
   off disk, refresh manually with `python3 scripts/rollup.py --html`.
+- **⟳ Rollup button** (served mode only): header button that POSTs
+  `/api/rollup` to re-run the rollup unconditionally — even when no source DB
+  changed — refreshing `dashboard.html` and `dashboard_data.json`, then
+  reloads. Useful for pushing a fresh JSON export to external consumers (e.g.
+  the mobile viewer). Hidden in static views.
 
 ---
 
@@ -290,7 +295,7 @@ to be exposed to a network.
   write; dates are ISO-validated
 - Subprocesses use argument lists (`shell=False`) — no shell injection
 - **CSRF / DNS-rebinding protection** on write endpoints (`/api/add`,
-  `/api/update`, `/api/done`): the `Host` header must match
+  `/api/update`, `/api/done`, `/api/rollup`): the `Host` header must match
   `127.0.0.1:PORT`/`localhost:PORT`; `Origin` (when present) must match; and a
   custom `X-Tracker` header is required, which cross-origin requests cannot set
   without a CORS preflight the server never grants
