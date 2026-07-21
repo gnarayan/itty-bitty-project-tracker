@@ -1,5 +1,6 @@
 # Generated outputs — re-create with `python3 scripts/rollup.py [--html]`
 dashboard.html
+dashboard_data.json
 MASTER_PRIORITIES.md
 
 # Per-project live data — each project dir has its own

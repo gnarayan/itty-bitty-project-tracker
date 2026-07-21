@@ -81,6 +81,7 @@ BASE          = _HERE.parent
 DB_PATH       = BASE / "action_items.db"
 MD_OUT_PATH   = BASE / "MASTER_PRIORITIES.md"
 HTML_OUT_PATH = BASE / "dashboard.html"
+JSON_OUT_PATH = BASE / "dashboard_data.json"
 
 PROJECT_TITLE     = _c("PROJECT_TITLE", "Cross-Project Priorities")
 PROJECTS          = _c("PROJECTS", [])          # [(label, path_tail), ...]
@@ -1679,8 +1680,8 @@ __PROJECTS_META_JSON__
 </html>"""
 
 
-def render_html(all_open_items, window_days, generated_date, today_iso):
-    """Return a self-contained HTML dashboard with item data embedded as JSON."""
+def build_dashboard_payload(all_open_items, include_fp=True):
+    """Return the list of item dicts embedded in the dashboard / JSON export."""
     data = []
     for item in all_open_items:
         d = dict(item)
@@ -1691,12 +1692,19 @@ def render_html(all_open_items, window_days, generated_date, today_iso):
             d["_xp_tags"] = []
         # Drop _db to keep the embedded JSON lean
         d.pop("_db", None)
-        # Fingerprint used by the browser for optimistic-concurrency on edits.
-        # Must include the raw xp_tags string so it matches the server-side
-        # recomputation in serve.py (_check_fingerprint hashes the live column).
-        d["_fp"] = item_fingerprint(d)
+        if include_fp:
+            # Fingerprint used by the browser for optimistic-concurrency on edits.
+            # Must include the raw xp_tags string so it matches the server-side
+            # recomputation in serve.py (_check_fingerprint hashes the live column).
+            d["_fp"] = item_fingerprint(d)
         d.pop("xp_tags", None)   # client uses the parsed _xp_tags list
         data.append(d)
+    return data
+
+
+def render_html(all_open_items, window_days, generated_date, today_iso):
+    """Return a self-contained HTML dashboard with item data embedded as JSON."""
+    data = build_dashboard_payload(all_open_items)
 
     # Guard against </script> and <!-- sequences in embedded JSON by escaping
     # every "<" as \\u003c — valid JSON, inert in HTML. (String-level tricks
@@ -1775,6 +1783,20 @@ def main():
         out_path = Path(args.output) if args.output else HTML_OUT_PATH
         out_path.write_text(html, encoding="utf-8")
         print(f"Written: {out_path}  ({len(all_open)} items, {n_projects} project DBs scanned)")
+
+        # Companion JSON export (read-only consumers, e.g. the mobile viewer).
+        # No edit fingerprints; write-if-changed to avoid cloud-sync churn.
+        doc = {
+            "schema": 1,
+            "generated": generated,
+            "window_days": window,
+            "projects": build_projects_meta(),
+            "items": build_dashboard_payload(all_open, include_fp=False),
+        }
+        json_text = json.dumps(doc, ensure_ascii=False, default=str)
+        if not JSON_OUT_PATH.exists() or JSON_OUT_PATH.read_text(encoding="utf-8") != json_text:
+            JSON_OUT_PATH.write_text(json_text, encoding="utf-8")
+            print(f"Written: {JSON_OUT_PATH}")
         return
 
     # ---------------------------------------------------------------------------

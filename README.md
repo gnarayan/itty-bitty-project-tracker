@@ -138,6 +138,8 @@ itty-bitty-project-tracker/   ← master tracker hub (this repo)
 ├── action_items.db           ← master SQLite DB (gitignored)
 ├── action_items.md           ← auto-generated markdown view (gitignored)
 ├── dashboard.html            ← auto-generated dashboard (gitignored)
+├── dashboard_data.json       ← auto-generated JSON export for read-only consumers (gitignored)
+├── mobile.html               ← read-only mobile viewer (see REFERENCE.md)
 └── MASTER_PRIORITIES.md      ← auto-generated rollup (gitignored)
 ```
 

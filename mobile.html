@@ -1,0 +1,474 @@
+<title>Tracker</title>
+<style>
+  :root {
+    --bg: #f5f7f6;
+    --surface: #ffffff;
+    --ink: #1a2423;
+    --muted: #5f6f6d;
+    --line: #dde5e3;
+    --accent: #0a7c7d;
+    --accent-ink: #ffffff;
+    --overdue: #b3382e;
+    --warn: #a66a00;
+    --dim: 0.55;
+    --chip-bg: #e8eeec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101615;
+      --surface: #1a2120;
+      --ink: #e4ecea;
+      --muted: #8fa09d;
+      --line: #2a3432;
+      --accent: #3bb3b0;
+      --accent-ink: #08201f;
+      --overdue: #e4796f;
+      --warn: #d9a04a;
+      --chip-bg: #232d2b;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f7f6; --surface: #ffffff; --ink: #1a2423; --muted: #5f6f6d;
+    --line: #dde5e3; --accent: #0a7c7d; --accent-ink: #ffffff;
+    --overdue: #b3382e; --warn: #a66a00; --chip-bg: #e8eeec;
+  }
+  :root[data-theme="dark"] {
+    --bg: #101615; --surface: #1a2120; --ink: #e4ecea; --muted: #8fa09d;
+    --line: #2a3432; --accent: #3bb3b0; --accent-ink: #08201f;
+    --overdue: #e4796f; --warn: #d9a04a; --chip-bg: #232d2b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+         background: var(--chip-bg); padding: 0 0.25em; border-radius: 3px; }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+    padding: 0.6rem 0.9rem 0.55rem;
+  }
+  .hrow { display: flex; align-items: baseline; gap: 0.6rem; }
+  h1 { font-size: 1.05rem; margin: 0; letter-spacing: 0.01em; }
+  #fresh { font-size: 0.72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #fresh.warn { color: var(--warn); }
+  #spin { display: none; font-size: 0.72rem; color: var(--muted); }
+  #spin.on { display: inline; }
+  .controls { display: flex; gap: 0.5rem; margin-top: 0.55rem; }
+  #q {
+    flex: 1; min-width: 0;
+    font: inherit; font-size: 0.9rem;
+    color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.35rem 0.6rem;
+  }
+  #q:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #scope {
+    font: inherit; font-size: 0.78rem;
+    color: var(--muted); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.35rem 0.55rem;
+    white-space: nowrap;
+  }
+  #scope[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  #chips, #stchips {
+    display: flex; gap: 0.4rem; overflow-x: auto;
+    margin-top: 0.55rem; padding-bottom: 0.15rem;
+    scrollbar-width: none;
+  }
+  #stchips { margin-top: 0.35rem; }
+  #stchips .chip { font-size: 0.7rem; padding: 0.16rem 0.6rem; }
+  #chips::-webkit-scrollbar, #stchips::-webkit-scrollbar { display: none; }
+  .chip {
+    font: inherit; font-size: 0.78rem; white-space: nowrap;
+    color: var(--ink); background: var(--chip-bg);
+    border: 1px solid transparent; border-radius: 999px;
+    padding: 0.22rem 0.7rem;
+  }
+  .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .chip:focus-visible, #scope:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  main { padding: 0.4rem 0.9rem 3rem; max-width: 44rem; margin: 0 auto; }
+  .ghead {
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin: 1.1rem 0 0.4rem;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .ghead .n { font-weight: 400; font-variant-numeric: tabular-nums; }
+  .ghead.overdue { color: var(--overdue); }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden;
+  }
+  .item { border-bottom: 1px solid var(--line); }
+  .item:last-child { border-bottom: none; }
+  .item.dim > summary { opacity: var(--dim); }
+  summary {
+    list-style: none; cursor: pointer;
+    padding: 0.55rem 0.7rem;
+    display: grid; grid-template-columns: 1fr auto; gap: 0.15rem 0.5rem;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .t { font-size: 0.9rem; overflow-wrap: anywhere; }
+  .dl {
+    grid-column: 2; grid-row: 1;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.74rem; color: var(--muted); font-variant-numeric: tabular-nums;
+    align-self: start; white-space: nowrap;
+  }
+  .dl.overdue { color: var(--overdue); font-weight: 600; }
+  .meta { grid-column: 1 / -1; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+  .badge {
+    font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em;
+    color: var(--accent); border: 1px solid currentColor;
+    border-radius: 4px; padding: 0 0.3rem;
+  }
+  .tag { font-size: 0.68rem; color: var(--muted); letter-spacing: 0.04em; }
+  .tag.hot { color: var(--warn); font-weight: 600; }
+  .detail {
+    padding: 0 0.7rem 0.65rem; font-size: 0.84rem; color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .detail strong { color: var(--ink); }
+  .detail .kv { margin-top: 0.3rem; font-size: 0.76rem; }
+  .state {
+    margin: 2.5rem auto; max-width: 26rem; text-align: center;
+    color: var(--muted); font-size: 0.9rem; padding: 0 1rem;
+  }
+  .state b { color: var(--ink); }
+  .empty { color: var(--muted); font-size: 0.85rem; padding: 0.6rem 0.7rem; }
+  @media (prefers-reduced-motion: no-preference) {
+    .item .detail { animation: fade 0.15s ease; }
+    @keyframes fade { from { opacity: 0; } }
+  }
+</style>
+
+<header>
+  <div class="hrow">
+    <h1>Tracker</h1>
+    <span id="fresh"></span>
+    <span id="spin">refreshing…</span>
+  </div>
+  <div class="controls">
+    <input id="q" type="search" placeholder="Search title, detail, owner, id" aria-label="Search items">
+    <button id="scope" aria-pressed="false" title="Include items outside the rollup window">all open</button>
+  </div>
+  <div id="chips" role="group" aria-label="Project filter"></div>
+  <div id="stchips" role="group" aria-label="Status filter"></div>
+</header>
+<main id="main"><div class="state" id="boot">Loading tracker data…</div></main>
+
+<script>
+(function () {
+  "use strict";
+  // EDIT ME: Dropbox path of your hub's dashboard_data.json (written by
+  // `rollup.py --html`), relative to your Dropbox root.
+  var DATA_PATH = "/work/tracker/dashboard_data.json";
+  // Optional: the file's stable Dropbox id ("id:..."), from get_file_metadata.
+  // Speeds up call-shape probing; leave null to rely on path-based calls.
+  var DATA_FILE_ID = null;
+  var $ = function (id) { return document.getElementById(id); };
+  var main = $("main"), fresh = $("fresh"), spin = $("spin"), chips = $("chips"), stchips = $("stchips");
+
+  var state = { doc: null, storedAt: null, project: null, status: null, query: "", showAll: false, open: {} };
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  // status_detail carries light markdown: **bold** and `code`.
+  function md(s) {
+    return esc(s)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+  }
+  function todayISO() {
+    var d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" +
+           String(d.getDate()).padStart(2, "0");
+  }
+  function plusDaysISO(n) {
+    var d = new Date(); d.setDate(d.getDate() + n);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" +
+           String(d.getDate()).padStart(2, "0");
+  }
+
+  function showState(html) { main.innerHTML = '<div class="state">' + html + "</div>"; }
+
+  function renderFresh() {
+    if (!state.doc) { fresh.textContent = ""; return; }
+    var txt = "data " + state.doc.generated;
+    if (state.storedAt) {
+      var mins = Math.max(0, Math.round((Date.now() - state.storedAt) / 60000));
+      txt += " · checked " + (mins < 1 ? "just now" : mins + "m ago");
+    }
+    fresh.textContent = txt;
+    // Warn when the rollup itself is old (Mac hasn't regenerated in >2 days).
+    fresh.className = state.doc.generated < plusDaysISO(-2) ? "warn" : "";
+  }
+
+  function renderChips() {
+    var labels = (state.doc.projects || []).map(function (p) { return p.label; });
+    var html = '<button class="chip" aria-pressed="' + (state.project === null) + '" data-p="">All</button>';
+    labels.forEach(function (l) {
+      html += '<button class="chip" aria-pressed="' + (state.project === l) + '" data-p="' + esc(l) + '">' + esc(l) + "</button>";
+    });
+    chips.innerHTML = html;
+  }
+
+  function renderStatusChips() {
+    // Status values present in the current scope (surfaced vs all), by frequency.
+    var counts = {};
+    (state.doc.items || []).forEach(function (it) {
+      if (!state.showAll && !it._surfaced) return;
+      var s = it.status_tag || "";
+      if (s) counts[s] = (counts[s] || 0) + 1;
+    });
+    var tags = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+    if (state.status && tags.indexOf(state.status) === -1) state.status = null;
+    var html = '<button class="chip" aria-pressed="' + (state.status === null) + '" data-s="">Any status</button>';
+    tags.forEach(function (s) {
+      html += '<button class="chip" aria-pressed="' + (state.status === s) + '" data-s="' + esc(s) + '">' +
+              esc(s.toLowerCase()) + " " + counts[s] + "</button>";
+    });
+    stchips.innerHTML = html;
+  }
+
+  function itemRow(it) {
+    var today = todayISO();
+    var overdue = it.deadline && it.deadline < today;
+    var dimmed = (it.wait_until && it.wait_until > today) || (it.blocked_by && it.blocked_by.length);
+    var id = it._project + "#" + it.raw_id;
+    var tagHot = it.status_tag === "IN PROGRESS" || it.status_tag === "ACTIVE";
+    var kv = [];
+    if (it.owner) kv.push("owner: " + esc(it.owner));
+    if (it.section) kv.push("section: " + esc(it.section));
+    if (it.wait_until) kv.push("snoozed until " + esc(it.wait_until));
+    if (it.blocked_by && it.blocked_by.length) kv.push("blocked by " + esc(it.blocked_by.join(", ")));
+    if (it.recur) kv.push("recurs: " + esc(it.recur));
+    kv.push(esc(id));
+    return '<details class="item' + (dimmed ? " dim" : "") + '" data-id="' + esc(id) + '"' + (state.open[id] ? " open" : "") + ">" +
+      "<summary>" +
+        '<div class="t">' + md(it.title) + "</div>" +
+        '<div class="dl' + (overdue ? " overdue" : "") + '">' + (it.deadline ? esc(it.deadline) : "") + "</div>" +
+        '<div class="meta"><span class="badge">' + esc(it._project) + "</span>" +
+        '<span class="tag' + (tagHot ? " hot" : "") + '">' + esc(it.status_tag || "") + "</span></div>" +
+      "</summary>" +
+      '<div class="detail">' + (it.status_detail ? md(it.status_detail) : "") +
+        '<div class="kv">' + kv.join(" · ") + "</div></div>" +
+    "</details>";
+  }
+
+  function render() {
+    if (!state.doc) return;
+    renderFresh(); renderChips(); renderStatusChips();
+    var q = state.query.toLowerCase();
+    var items = (state.doc.items || []).filter(function (it) {
+      if (!state.showAll && !it._surfaced) return false;
+      if (state.project && it._project !== state.project &&
+          (it._xp_tags || []).indexOf(state.project) === -1) return false;
+      if (state.status && it.status_tag !== state.status) return false;
+      if (q) {
+        var hay = (it.title + " " + (it.status_detail || "") + " " + (it.owner || "") + " " +
+                   it._project + "#" + it.raw_id).toLowerCase();
+        if (hay.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+    var today = todayISO(), week = plusDaysISO(7);
+    var groups = [
+      { key: "overdue", name: "Overdue", cls: "overdue", items: [] },
+      { key: "week", name: "Due this week", cls: "", items: [] },
+      { key: "later", name: "Due later", cls: "", items: [] },
+      { key: "none", name: "No deadline", cls: "", items: [] },
+    ];
+    items.forEach(function (it) {
+      if (!it.deadline) groups[3].items.push(it);
+      else if (it.deadline < today) groups[0].items.push(it);
+      else if (it.deadline <= week) groups[1].items.push(it);
+      else groups[2].items.push(it);
+    });
+    var html = "";
+    groups.forEach(function (g) {
+      if (!g.items.length) return;
+      html += '<div class="ghead ' + g.cls + '"><span>' + g.name +
+              '</span><span class="n">' + g.items.length + "</span></div>";
+      html += '<div class="card">' + g.items.map(itemRow).join("") + "</div>";
+    });
+    if (!html) html = '<div class="state">No matching items.</div>';
+    main.innerHTML = html;
+  }
+
+  // --- controls ---
+  $("q").addEventListener("input", function (e) { state.query = e.target.value; render(); });
+  $("scope").addEventListener("click", function () {
+    state.showAll = !state.showAll;
+    this.setAttribute("aria-pressed", String(state.showAll));
+    render();
+  });
+  chips.addEventListener("click", function (e) {
+    var b = e.target.closest(".chip");
+    if (!b) return;
+    state.project = b.dataset.p || null;
+    render();
+  });
+  stchips.addEventListener("click", function (e) {
+    var b = e.target.closest(".chip");
+    if (!b) return;
+    state.status = b.dataset.s || null;
+    render();
+  });
+  // Remember expanded items across re-renders.
+  main.addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (d.classList && d.classList.contains("item")) state.open[d.dataset.id] = d.open;
+  }, true);
+
+  // --- data via the viewer's Dropbox connector ---
+  if (!window.claude || window.claude.mcp === undefined) {
+    showState("This page needs the claude.ai runtime.<br>Open it from your Artifacts in the claude.ai app or browser.");
+    return;
+  }
+
+  var haveData = false;
+  // The tracker doc, wherever the connector put it: directly in payload, as a
+  // JSON string, inside a {content: "..."} envelope, or in a text block.
+  function extractDoc(result) {
+    var seen = [];
+    function tryVal(v, depth) {
+      if (v == null || depth > 4) return null;
+      if (typeof v === "string") {
+        var s = v.trim();
+        if (s[0] !== "{" && s[0] !== "[") return null;
+        try { return tryVal(JSON.parse(s), depth + 1); } catch (e) { return null; }
+      }
+      if (typeof v === "object" && !Array.isArray(v)) {
+        if (Array.isArray(v.items)) return v;                       // the doc itself
+        if (v.status && v.status !== "success") { seen.push(v); return null; }
+        if (v.content != null && typeof v.content === "string") return tryVal(v.content, depth + 1);
+        if (v.text != null) return tryVal(v.text, depth + 1);
+      }
+      return null;
+    }
+    var doc = tryVal(result.payload, 0);
+    if (!doc && Array.isArray(result.content)) {
+      for (var i = 0; i < result.content.length && !doc; i++) {
+        if (result.content[i].type === "text") doc = tryVal(result.content[i].text, 0);
+      }
+    }
+    return { doc: doc, failed: seen[0] || null };
+  }
+  function handleData(result) {
+    var ex = extractDoc(result);
+    if (!ex.doc) {
+      // The connector resolves (not rejects) on extraction failure, e.g. file missing.
+      if (!haveData) showState("<b>Tracker data not found in Dropbox.</b><br>On the Mac, run:<br><code>python3 scripts/rollup.py --html</code><br>then wait for Dropbox to sync." +
+        (ex.failed && ex.failed.error_message ? "<br><br>(" + esc(ex.failed.error_message) + ")" : ""));
+      return;
+    }
+    haveData = true;
+    state.doc = ex.doc;
+    state.storedAt = (result.cache && result.cache.storedAt) || Date.now();
+    spin.className = (result.cache && result.cache.revalidating) ? "on" : "";
+    render();
+  }
+
+  function handleError(err) {
+    var code = err && err.code;
+    spin.className = "";
+    var fixes = {
+      needs_reauth: "<b>Dropbox needs to be reconnected.</b><br>Reconnect Dropbox in claude.ai Settings → Connectors.",
+      server_not_connected: "<b>Dropbox connector not found.</b><br>Add Dropbox in claude.ai Settings → Connectors.",
+      selection_required: "<b>Choose a Dropbox connector.</b><br>More than one is configured — pick one when prompted.",
+      blocked_by_policy: "<b>Dropbox access is blocked by policy.</b>",
+      approval_required: "<b>This call needs approval,</b> which artifacts can't request yet.",
+      not_granted: "This page wasn't granted connector access. Reopen it and allow Dropbox access.",
+      capability_disabled: "This view can't use connectors. Reopen the artifact in the claude.ai app or browser.",
+      capability_removed: "This view can't use connectors. Reopen the artifact in the claude.ai app or browser.",
+      not_in_manifest: "<b>Page/connector mismatch.</b> Republish the artifact.",
+    };
+    var authz = { needs_reauth: 1, server_not_connected: 1, blocked_by_policy: 1, approval_required: 1, not_granted: 1 };
+    if (authz[code]) { haveData = false; state.doc = null; renderFresh(); }
+    if (fixes[code]) {
+      showState(fixes[code] + (err.message ? '<br><span style="font-size:0.75rem">(' + esc(err.message) + ")</span>" : ""));
+      return;
+    }
+    if (code === "tool_error") {
+      if (!haveData) showState("<b>Dropbox reported an error.</b><br>" + esc(err.message || ""));
+      return;
+    }
+    // server_unavailable / upstream_error / rate_limited / unknown: transient.
+    if (haveData) { fresh.className = "warn"; return; }  // keep last-good view, mark stale
+    showState("<b>Couldn't reach Dropbox.</b><br>" + esc(err && err.message || "Try again shortly."));
+  }
+
+  function startWatch(toolName, input) {
+    var unsub = window.claude.mcp.watchTool(
+      "Dropbox", toolName, input,
+      function (ev) {
+        if (ev.type === "data") handleData(ev.result);
+        else handleError(ev.error);
+      },
+      { refetchInterval: 300000, cache: { staleTime: 60000 } }
+    );
+    return unsub;
+  }
+
+  // The chat-surface Dropbox connector names its extraction tool "fetch"
+  // (settings: "Fetch Extracted File Text"); its argument name is unobserved,
+  // so probe tool + argument-shape combos with a real read call and adopt the
+  // first that yields the tracker doc.
+  var CANDIDATES = [
+    { t: "fetch", i: {} },  // strict validator names the required properties in its error
+    { t: "fetch", i: { id: DATA_PATH } },
+    { t: "fetch", i: { url: DATA_PATH } },
+    { t: "fetch", i: { uri: DATA_PATH } },
+  ];
+  if (DATA_FILE_ID) {
+    CANDIDATES.splice(1, 0, { t: "fetch", i: { id: DATA_FILE_ID } },
+                            { t: "fetch", i: { file_id: DATA_FILE_ID } });
+  }
+  var attempts = [];
+  function probe(idx) {
+    if (idx >= CANDIDATES.length) {
+      window.claude.mcp.listTools().then(function (res) {
+        var servers = (res.servers || []).map(function (s) {
+          return s.server + " [" + s.authStatus + "] tools: " +
+                 ((s.tools || []).map(function (t) { return t.name; }).join(", ") || "none");
+        });
+        showState("<b>Could not reach the tracker file.</b><br>Tried:<br>" +
+          attempts.map(esc).join("<br>") +
+          "<br><br>Connectors visible to this page:<br>" + esc(servers.join(" | ") || "none"));
+      }).catch(function () {
+        showState("<b>Could not reach the tracker file.</b><br>Tried:<br>" + attempts.map(esc).join("<br>"));
+      });
+      return;
+    }
+    var c = CANDIDATES[idx];
+    window.claude.mcp.callTool("Dropbox", c.t, c.i)
+      .then(function (result) {
+        var ex = extractDoc(result);
+        if (ex.doc || (ex.failed && ex.failed.error_message)) {
+          // Real answer (data, or a genuine extraction failure like file-missing).
+          handleData(result);
+          startWatch(c.t, c.i);
+        } else {
+          attempts.push(c.t + " " + JSON.stringify(c.i) + " → unrecognized result shape");
+          probe(idx + 1);
+        }
+      })
+      .catch(function (err) {
+        attempts.push(c.t + " " + JSON.stringify(Object.keys(c.i)) + " → " + (err && err.code) +
+                      (err && err.message ? " (" + err.message + ")" : ""));
+        probe(idx + 1);
+      });
+  }
+  probe(0);
+})();
+</script>

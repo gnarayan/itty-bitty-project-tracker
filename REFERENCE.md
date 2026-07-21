@@ -129,10 +129,26 @@ Run from the master hub directory:
 
 ```bash
 python3 scripts/rollup.py                           # write MASTER_PRIORITIES.md
-python3 scripts/rollup.py --html                    # write dashboard.html
+python3 scripts/rollup.py --html                    # write dashboard.html + dashboard_data.json
 python3 scripts/rollup.py --window-days 30          # narrow the deadline window
 python3 scripts/rollup.py --json                    # dump to stdout as JSON
 ```
+
+`--html` also writes `dashboard_data.json` next to the dashboard — the same
+item/project payload as the embedded dashboard data (minus edit fingerprints),
+for read-only external consumers (e.g. a mobile viewer reading the file from a
+cloud-synced copy). It is only rewritten when its content changes, and is only
+as fresh as the last `--html` run (the local server's regen-on-read keeps it
+current while running).
+
+**Mobile viewer** (`mobile.html`): a read-only page designed to be published as
+a claude.ai Artifact with the Dropbox connector (`mcp` capability, extraction
+tool `fetch` only — the chat-surface Dropbox connector's tool names differ
+from Claude Code's; the page probes for the working call at boot). It reads
+`dashboard_data.json` from the cloud-synced
+copy of this directory at open time, so the phone always sees the last rollup
+without republishing. It never writes anything; edits still go through
+`todo.py` / the local dashboard server.
 
 Items from a project surface in the rollup when any of:
 - deadline within `ROLLUP_WINDOW_DAYS` of today,
