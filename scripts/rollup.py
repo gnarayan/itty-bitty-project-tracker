@@ -717,6 +717,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <h1>__TITLE__</h1>
     <div class="meta">Generated __GENERATED__ &middot; __WINDOW_DAYS__-day window</div>
     <div class="header-actions">
+      <button class="icon-btn" id="rollup-btn" title="Re-run the cross-project rollup now (refreshes dashboard + JSON export)">⟳ Rollup</button>
       <button class="icon-btn" id="add-btn">+ Add</button>
       <button class="icon-btn" id="group-btn">Group: <span id="group-label">None</span></button>
       <button class="icon-btn" id="theme-btn" aria-label="Toggle dark/light theme">🌙</button>
@@ -1352,6 +1353,32 @@ __PROJECTS_META_JSON__
   // ── Add-task modal ────────────────────────────────────────────────────────
   var PROJECTS_META = JSON.parse(document.getElementById('projects-meta').textContent);
   var SERVED = (location.protocol === 'http:' || location.protocol === 'https:');
+
+  // Rollup button — served mode only (static views regenerate via the CLI)
+  var rollupBtn = document.getElementById('rollup-btn');
+  if (!SERVED) {
+    rollupBtn.style.display = 'none';
+  } else {
+    rollupBtn.onclick = function() {
+      rollupBtn.disabled = true;
+      rollupBtn.textContent = '⟳ Running…';
+      fetch('/api/rollup', {method: 'POST', headers: {'X-Tracker': '1'}})
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          if (j.ok) {
+            rollupBtn.textContent = '✅ Done';
+            setTimeout(function() { location.reload(); }, 600);
+          } else {
+            rollupBtn.textContent = '❌ ' + (j.error || 'failed');
+            rollupBtn.disabled = false;
+          }
+        })
+        .catch(function() {
+          rollupBtn.textContent = '❌ server unreachable';
+          rollupBtn.disabled = false;
+        });
+    };
+  }
 
   var addOverlay   = document.getElementById('add-overlay');
   var addResult    = document.getElementById('add-result');

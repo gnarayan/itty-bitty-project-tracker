@@ -6,6 +6,7 @@ Serves dashboard.html at http://127.0.0.1:PORT and exposes write endpoints:
   POST /api/add     — create a new task in a project DB
   POST /api/update  — edit an existing task's structured fields
   POST /api/done    — mark a task done or archive it
+  POST /api/rollup  — re-run the rollup unconditionally (dashboard ⟳ button)
 
 All write paths validate inputs against a project/section whitelist, check
 an optimistic-concurrency fingerprint (reject stale writes), and hold a
@@ -500,7 +501,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
-        if path not in ("/api/add", "/api/update", "/api/done"):
+        if path not in ("/api/add", "/api/update", "/api/done", "/api/rollup"):
             self.send_response(404)
             self.end_headers()
             return
@@ -526,6 +527,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not x_tracker:
             self._json(403, {"ok": False, "error": "forbidden"})
+            return
+
+        if path == "/api/rollup":
+            # Unconditional regeneration (no body) — the dashboard's ⟳ Rollup button.
+            with _WRITE_LOCK:
+                r = subprocess.run(
+                    [sys.executable, str(ROLLUP_PY), "--html"],
+                    cwd=str(BASE), capture_output=True, text=True,
+                )
+            if r.returncode != 0:
+                msg = r.stderr.strip() or r.stdout.strip() or "rollup failed"
+                self._json(500, {"ok": False, "error": msg})
+            else:
+                self._json(200, {"ok": True, "output": r.stdout.strip()})
             return
 
         length = int(self.headers.get("Content-Length", 0))
@@ -566,7 +581,7 @@ def main():
 
     url = f"http://127.0.0.1:{args.port}"
     log.info("Priorities dashboard  ->  %s", url)
-    log.info("Write endpoints       ->  POST %s/api/add | /api/update | /api/done", url)
+    log.info("Write endpoints       ->  POST %s/api/add | /api/update | /api/done | /api/rollup", url)
     if not log_file:
         log.info("Press Ctrl-C to stop.")
 
