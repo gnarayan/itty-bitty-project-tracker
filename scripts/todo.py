@@ -166,6 +166,11 @@ def extract_deadline(text):
         # manually throughout status_detail logs); it is never a deadline.
         if re.fullmatch(r'\s*20\d{2}-\d{2}-\d{2}:?\s*', span):
             continue
+        # Colon-terminated bold spans ("**Current (2026-08-20):**") are section
+        # headers/labels in status logs, never deadline callouts; an explicit
+        # deadline is still caught by the keyword regex above.
+        if span.rstrip().endswith(':'):
+            continue
         dm = re.search(r'(20\d{2}-\d{2}-\d{2})', span)
         if dm:
             return dm.group(1)

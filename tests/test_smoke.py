@@ -168,6 +168,22 @@ class TestUpdateDeadline(_ProjectFixture):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._deadline_of(iid), soon)
 
+    def test_dated_section_headers_are_not_mistaken_for_deadline(self):
+        """Colon-terminated bold labels carrying a date ("**Current
+        (2026-08-20):**", "**Root cause found (2026-07-02):**") are section
+        headers in status logs, not deadline callouts — a status update must
+        not set the deadline from them. (2026-08-26 Advising bloat-sweep:
+        two items acquired spurious deadlines this way.)"""
+        self._init()
+        iid = self._add("--section", "active", "--title", "Log-style status")
+        self.assertIsNone(self._deadline_of(iid))
+        r = self._run("update", iid, "--status",
+                       "OPEN — current state.\n"
+                       "**Current (2026-08-20):** paper cleanup done.\n"
+                       "**Root cause found (2026-07-02):** ZP mis-scaling.")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self._deadline_of(iid))
+
     def test_status_with_explicit_deadline_flag_wins(self):
         self._init()
         soon = (date.today() + timedelta(days=3)).isoformat()
