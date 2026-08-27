@@ -237,7 +237,9 @@ instead of re-reading the docs and markdown exports.
 
 `--status` text is scanned for a leading status keyword (word-boundary match
 against `STATUS_KEYWORDS`) and for a `deadline: YYYY-MM-DD` phrase or a bolded
-date, which set `status_tag` and `deadline` automatically. Explicit `--tag` /
+date, which set `status_tag` and `deadline` automatically. Bold spans that are
+log headers — bare `**YYYY-MM-DD:**` stamps and colon-terminated labels like
+`**Current (2026-08-20):**` — are skipped by the bolded-date fallback. Explicit `--tag` /
 `--deadline` flags always win. `append` adds a `**YYYY-MM-DD:**`-stamped note
 without touching an existing deadline.
 
