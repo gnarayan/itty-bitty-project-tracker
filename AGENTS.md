@@ -58,13 +58,18 @@ python3 scripts/todo.py update <id> [--deadline YYYY-MM-DD] [--tag STATUS] [--ti
 python3 scripts/todo.py update <id> --priority H|M|L | --snooze YYYY-MM-DD | --recur 2w | --depends 3,7
 python3 scripts/todo.py update <id> --status-file -   # multi-line status via stdin
 python3 scripts/todo.py append <id> --text "dated status note"
-python3 scripts/todo.py done <id>                  # close (see invariants 2–3)
+python3 scripts/todo.py done <id>                  # close (see invariants 2–3); "close" also works as an alias
 python3 scripts/todo.py archive <id>
 ```
 
 Field-clearing on `update`: pass `""` to `--deadline`, `--priority`,
 `--snooze`, `--recur`, `--depends`, or `--xp`. `--recur` requires a deadline.
 `--wait` is an alias for `--snooze`.
+
+**Common mistakes (all produce `Exit code 2` / `usage: ...`):**
+- `append <id> "text"` — bare positional text is **not accepted**. Always use `append <id> --text "..."` (or `--text-file`).
+- `--note`, `--status`, `--detail` are **not real flags anywhere in this CLI**. The status-note flag is `--text` on `append` and `--status`/`--status-file` on `update` — not interchangeable, not on other subcommands.
+- `close` used to be an invalid subcommand (bare `usage: todo.py [-h] ...` with no subcommand-specific detail); it now works as an alias for `done`, but `done` is still the documented/canonical form.
 
 ---
 

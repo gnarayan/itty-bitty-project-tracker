@@ -1322,7 +1322,7 @@ def build_parser():
                      help="Read text from file ('-' = stdin)")
 
     # done
-    pd = sub.add_parser("done", help="Mark item DONE, archive it, regenerate MD")
+    pd = sub.add_parser("done", aliases=["close"], help="Mark item DONE, archive it, regenerate MD")
     pd.add_argument("id", metavar="ID")
 
     # archive
@@ -1356,6 +1356,7 @@ def main():
         "update":  cmd_update,
         "append":  cmd_append,
         "done":    lambda a: cmd_done_archive(a, "DONE"),
+        "close":   lambda a: cmd_done_archive(a, "DONE"),
         "archive": lambda a: cmd_done_archive(a, "ARCHIVED"),
         "migrate-ids": cmd_migrate_ids,
         "export":  cmd_export,
