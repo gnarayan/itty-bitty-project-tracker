@@ -208,6 +208,29 @@ overdue: every DB open rolls its deadline forward to the next occurrence after
 today and appends a dated "rolled recurring deadline" note to its status.
 Standing items are exempt.
 
+### Stale-item audit (`audit`)
+
+`python3 scripts/todo.py audit [--overdue-days N] [--stale-days N] [--dup-threshold F] [--json]`
+
+Read-only. Mechanical checks only; it never closes anything. Reports:
+
+- **overdue_event** — overdue by >N days (default 14) and the title names a
+  calendar date that has passed (ISO or `Sep 14`); usually close or reframe.
+- **overdue_open** — overdue with no event date; reschedule or close.
+- **recurring_missed** — recurring item rolled forward ≥2 times without a `done`.
+- **dangling_deps** — `depends_on` points at an id no longer in the DB
+  (closed or never existed). Harmless to `ready`, but clear it.
+- **standing_candidates** — no deadline, monitor-shaped (tag MONITORING/DORMANT/
+  ON HOLD or title starts watch/track/monitor/await), no dated note in N days
+  (default 90).
+- **untouched** — no deadline and no dated status note in N days.
+- **near_duplicates** — title-token Jaccard ≥ F (default 0.4). Weak signal;
+  real duplicates often share a topic, not title words.
+
+Cross-project checks live in the hub: `python3 scripts/rollup.py --audit
+[--json]` lists registered projects with no readable DB and near-duplicate
+titles across different project DBs.
+
 ### Task dependencies (`--depends ID[,ID]`)
 
 Informational — does not block writes or completion. Unmet dependencies show a

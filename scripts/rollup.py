@@ -1755,6 +1755,73 @@ def render_html(all_open_items, window_days, generated_date, today_iso):
 # Main
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# --audit: cross-project checks that no single project DB can see
+# ---------------------------------------------------------------------------
+
+_AUDIT_STOP = frozenset("""
+the a an of to for and or in on at with by from vs via re w is are be as
+this that it its into over after before per not no new re
+""".split())
+
+
+def _title_tokens(title):
+    t = re.sub(r'\[[^\]]*\]', ' ', title or '')
+    return frozenset(w for w in re.findall(r'[a-z0-9]+', t.lower())
+                     if len(w) > 2 and w not in _AUDIT_STOP)
+
+
+def _jaccard(a, b):
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def cross_project_audit(cutoff, dup_threshold=0.4):
+    """Registry drift + near-duplicate titles across different project DBs."""
+    findings = {"missing_dbs": [], "cross_duplicates": []}
+    items = [dict(d, _project="master") for d in fetch_master_items(cutoff)]
+    for label, tail in PROJECTS:
+        db_path = resolve_project_db(tail)
+        if db_path is None:
+            findings["missing_dbs"].append({"label": label, "path": tail})
+            continue
+        try:
+            items.extend(fetch_project_items_all(label, db_path, cutoff))
+        except sqlite3.Error as e:
+            findings["missing_dbs"].append({"label": label, "path": tail, "error": str(e)})
+    toks = [(d, _title_tokens(d.get("title"))) for d in items]
+    for i in range(len(toks)):
+        for j in range(i + 1, len(toks)):
+            a, b = toks[i][0], toks[j][0]
+            if a["_project"] == b["_project"]:
+                continue
+            sim = _jaccard(toks[i][1], toks[j][1])
+            if sim >= dup_threshold:
+                findings["cross_duplicates"].append({
+                    "similarity": round(sim, 2),
+                    "a": {"project": a["_project"], "id": a["raw_id"], "sort_id": a.get("sort_id"), "title": a["title"]},
+                    "b": {"project": b["_project"], "id": b["raw_id"], "sort_id": b.get("sort_id"), "title": b["title"]},
+                })
+    findings["cross_duplicates"].sort(key=lambda d: -d["similarity"])
+    return findings
+
+
+def print_cross_project_audit(findings):
+    n = len(findings["missing_dbs"]) + len(findings["cross_duplicates"])
+    print(f"# Cross-project audit ({date.today().isoformat()}): {n} findings")
+    if findings["missing_dbs"]:
+        print(f"\n## Registered projects with no readable DB ({len(findings['missing_dbs'])}) — fix PROJECTS or create the DB")
+        for m in findings["missing_dbs"]:
+            print(f"  {m['label']}: {m['path']}" + (f"  ({m['error']})" if m.get('error') else ""))
+    if findings["cross_duplicates"]:
+        print(f"\n## Same item tracked in two projects? ({len(findings['cross_duplicates'])})")
+        for d in findings["cross_duplicates"]:
+            print(f"  [{d['similarity']}] {d['a']['project']} {d['a']['id']} #{d['a']['sort_id']} ↔ "
+                  f"{d['b']['project']} {d['b']['id']} #{d['b']['sort_id']}\n      {d['a']['title'][:70]}\n      {d['b']['title'][:70]}")
+    if n == 0:
+        print("\nNothing flagged.")
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="rollup.py",
@@ -1768,6 +1835,11 @@ def build_parser():
                    help="Print JSON to stdout instead of writing the file")
     p.add_argument("--html", action="store_true",
                    help="Write self-contained HTML dashboard instead of markdown")
+    p.add_argument("--audit", action="store_true",
+                   help="Read-only cross-project audit: registry drift + near-duplicate titles across DBs "
+                        "(per-project checks live in todo.py audit)")
+    p.add_argument("--dup-threshold", type=float, default=0.4, metavar="F",
+                   help="Title similarity for --audit (default 0.4)")
     return p
 
 
@@ -1781,6 +1853,14 @@ def main():
     window = args.window_days if args.window_days is not None else ROLLUP_WINDOW_DAYS
     today  = date.today()
     cutoff = (today + timedelta(days=window)).isoformat()
+
+    if args.audit:
+        findings = cross_project_audit(cutoff, args.dup_threshold)
+        if args.json:
+            print(json.dumps(findings, indent=2, ensure_ascii=False))
+        else:
+            print_cross_project_audit(findings)
+        return
 
     if args.html:
         # HTML mode: embed ALL open items per project (for drill-down beyond the window).

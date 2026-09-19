@@ -1456,3 +1456,125 @@ class TestDashboardNumRef(_HubFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAudit(_ProjectFixture):
+    """todo.py audit — read-only stale-item detection."""
+
+    def _audit(self, *extra):
+        r = self._run("audit", "--json", *extra)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_clean_db_has_no_findings(self):
+        self._init()
+        self._add("--section", "active", "--title", "Fresh item")
+        res = self._audit()
+        self.assertTrue(all(len(v) == 0 for v in res.values()), res)
+
+    def test_overdue_split_by_event_date_in_title(self):
+        self._init()
+        past = (date.today() - timedelta(days=30)).isoformat()
+        ev = self._add("--section", "active", "--title", f"Workshop on {past}", "--deadline", past)
+        op = self._add("--section", "active", "--title", "Write the report", "--deadline", past)
+        res = self._audit()
+        self.assertEqual([x["id"] for x in res["overdue_event"]], [ev])
+        self.assertEqual([x["id"] for x in res["overdue_open"]], [op])
+        # inside the grace window → not flagged
+        self.assertEqual(self._audit("--overdue-days", "60")["overdue_open"], [])
+
+    def test_month_name_date_in_title_counts_as_event(self):
+        self._init()
+        past = date.today() - timedelta(days=40)
+        title = f"Talk at meeting {past.strftime('%b')} {past.day}"
+        iid = self._add("--section", "active", "--title", title, "--deadline", past.isoformat())
+        res = self._audit()
+        self.assertEqual([x["id"] for x in res["overdue_event"]], [iid])
+
+    def test_dangling_dependency_flagged(self):
+        self._init()
+        a = self._add("--section", "active", "--title", "Prereq")
+        b = self._add("--section", "active", "--title", "Dependent", "--depends", a)
+        self.assertEqual(self._audit()["dangling_deps"], [])
+        r = self._run("archive", a)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        res = self._audit()
+        self.assertEqual(len(res["dangling_deps"]), 1)
+        self.assertEqual(res["dangling_deps"][0]["id"], b)
+        self.assertEqual(res["dangling_deps"][0]["missing"], [a])
+
+    def test_recurring_missed_twice_flagged(self):
+        self._init()
+        past = (date.today() - timedelta(days=20)).isoformat()
+        iid = self._add("--section", "active", "--title", "Weekly sync", "--deadline", past, "--recur", "weekly")
+        self._run("list")               # first open rolls it once
+        self.assertEqual(self._audit()["recurring_missed"], [])
+        # push the deadline back again and reopen → second roll
+        old = (date.today() - timedelta(days=8)).isoformat()
+        self._run("update", iid, "--deadline", old)
+        self._run("list")
+        res = self._audit()
+        self.assertEqual([x["id"] for x in res["recurring_missed"]], [iid])
+        self.assertGreaterEqual(res["recurring_missed"][0]["missed"], 2)
+
+    def test_untouched_and_standing_candidates(self):
+        self._init()
+        old = (date.today() - timedelta(days=120)).isoformat()
+        w = self._add("--section", "active", "--title", "Watch for the call")
+        u = self._add("--section", "active", "--title", "Refactor thing")
+        # Backdate both via a dated status note older than the stale window.
+        for iid in (w, u):
+            self._run("update", iid, "--status", f"**{old}:** opened")
+        res = self._audit()
+        self.assertEqual([x["id"] for x in res["standing_candidates"]], [w])
+        self.assertEqual([x["id"] for x in res["untouched"]], [u])
+        # A fresh dated note clears the flag.
+        self._run("append", u, "--text", "still working on it")
+        self.assertEqual(self._audit()["untouched"], [])
+
+    def test_near_duplicate_titles(self):
+        self._init()
+        a = self._add("--section", "active", "--title", "Draft convener rotation sheet for working groups")
+        b = self._add("--section", "active", "--title", "Convener rotation sheet — working groups history tab")
+        self._add("--section", "active", "--title", "Book flights to Montreal")
+        res = self._audit()
+        self.assertEqual(len(res["near_duplicates"]), 1)
+        pair = {res["near_duplicates"][0]["a"]["id"], res["near_duplicates"][0]["b"]["id"]}
+        self.assertEqual(pair, {a, b})
+
+    def test_audit_makes_no_writes(self):
+        self._init()
+        past = (date.today() - timedelta(days=30)).isoformat()
+        self._add("--section", "active", "--title", "Old", "--deadline", past)
+        before = (self.proj / "action_items.db").read_bytes()
+        self._run("audit")
+        self.assertEqual(before, (self.proj / "action_items.db").read_bytes())
+
+
+class TestRollupAudit(_ProjectFixture):
+    def test_cross_project_audit_reports_missing_db_and_duplicate(self):
+        hub = Path(self.tmp) / "hub"
+        hub_scripts = hub / "scripts"
+        hub_scripts.mkdir(parents=True)
+        shutil.copy(str(SCRIPTS / "todo.py"),   str(hub_scripts / "todo.py"))
+        shutil.copy(str(SCRIPTS / "rollup.py"), str(hub_scripts / "rollup.py"))
+        (hub_scripts / "tracker_config.py").write_text(
+            f'PROJECT_TITLE = "Hub"\n'
+            f'SECTION_ORDER = [("active", "Active")]\n'
+            f'STANDING_SLUG = "watch"\n'
+            f'PROJECTS = [("proj", "{self.proj}"), ("ghost", "{self.tmp}/nowhere")]\n'
+        )
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "init"], cwd=str(hub), capture_output=True)
+        subprocess.run([sys.executable, str(hub_scripts / "todo.py"), "add", "--section", "active",
+                        "--title", "CLARIPHY talk: DESC AI slides for the shared deck"],
+                       cwd=str(hub), capture_output=True)
+        self._init()
+        self._add("--section", "active", "--title", "CLARIPHY meeting — DESC AI slides in shared deck")
+        r = subprocess.run([sys.executable, str(hub_scripts / "rollup.py"), "--audit", "--json"],
+                           cwd=str(hub), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        res = json.loads(r.stdout)
+        self.assertEqual([m["label"] for m in res["missing_dbs"]], ["ghost"])
+        self.assertEqual(len(res["cross_duplicates"]), 1)
+        projs = {res["cross_duplicates"][0]["a"]["project"], res["cross_duplicates"][0]["b"]["project"]}
+        self.assertEqual(projs, {"master", "proj"})

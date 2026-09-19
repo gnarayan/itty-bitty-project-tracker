@@ -97,6 +97,7 @@ This project uses [itty-bitty-project-tracker](https://github.com/gnarayan/itty-
 - **Claim:** `claim <id> [--by NAME]` before starting work — atomic, fails if another session already claimed it
 - **Add:** `python3 scripts/todo.py add --title "..."` (--section defaults to first slug in scripts/tracker_config.py)
 - **Update:** `update <id> [--deadline YYYY-MM-DD] [--tag STATUS] [--priority H|M|L] [--snooze DATE] [--recur RULE] [--depends IDs]` — pass "" to clear a field; --recur requires a deadline
+- **Audit:** `audit [--json]` — read-only stale report (overdue split by event date, missed recurring, dangling deps, standing candidates, untouched, near-dup titles); hub: `rollup.py --audit`. Judgment and closes stay with the agent/user.
 - **Note:** `append <id> --text "..."` — dated, non-destructive; the safe default for status updates
 - **Close:** `done <id>` — irreversible, respawns recurring items; `archive <id>` retires them
 - Never edit `action_items.md` (auto-generated); never bypass the CLI with raw sqlite

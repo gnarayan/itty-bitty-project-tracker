@@ -13,6 +13,7 @@ Subcommands:
   prime   [--limit N]        (agent-ready context dump: counts, ready/overdue, conventions)
   add     --section S --title "..." [--owner ...] [--deadline ...] [--recur RULE] [--depends ID[,ID]]
           [--status "..."|--status-file FILE]
+  audit   [--overdue-days N] [--stale-days N] [--dup-threshold F] [--json]
   update  <id> [--title ...] [--owner ...] [--deadline ...] [--tag ...] [--recur RULE] [--depends ID[,ID]]
           [--status "..."|--status-file -]
   append  <id> [--text "..."|--text-file -]
@@ -1113,6 +1114,191 @@ def cmd_done_archive(args, final_tag):
 # migrate-ids
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# audit — mechanical stale-item detection (no judgment, no writes)
+# ---------------------------------------------------------------------------
+
+_AUDIT_STOP = frozenset("""
+the a an of to for and or in on at with by from vs via re w is are be as
+this that it its into over after before per not no new re
+""".split())
+
+_MONTH_NUM = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _title_tokens(title):
+    """Lower-cased content words of a title; bracket tags and stopwords dropped."""
+    t = re.sub(r'\[[^\]]*\]', ' ', title or '')
+    toks = re.findall(r'[a-z0-9]+', t.lower())
+    return frozenset(w for w in toks if len(w) > 2 and w not in _AUDIT_STOP)
+
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _passed_date_in_title(title, today):
+    """Earliest calendar date named in the title that is already past, or None.
+
+    Recognises ISO dates and 'Sep 14' / 'September 14' / 'Sep 14-16' forms;
+    month-name dates without a year are assumed to be in today's year.
+    """
+    found = []
+    for m in re.finditer(r'(20\d{2})-(\d{2})-(\d{2})', title or ''):
+        try:
+            found.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except ValueError:
+            pass
+    for m in re.finditer(r'\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*[-–/]\s*\d{1,2})?\b', title or ''):
+        word = m.group(1).lower()
+        if word not in _MONTH_FULL_OK:      # rejects 'Mayor 12', 'Marlon 3' etc.
+            continue
+        mon = _MONTH_NUM[word[:3]]
+        try:
+            found.append(date(today.year, mon, int(m.group(2))))
+        except ValueError:
+            pass
+    past = [d for d in found if d < today]
+    return min(past).isoformat() if past else None
+
+
+_MONTH_FULL_OK = frozenset([
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "january", "february", "march", "april", "june", "july", "august", "september",
+    "october", "november", "december",
+])
+
+
+def _last_touch(row):
+    """Latest dated status note; falls back to source_date when the status has no dates."""
+    dates = re.findall(r'(20\d{2}-\d{2}-\d{2})', row['status_detail'] or '')
+    if dates:
+        return max(dates)
+    if row['source_date'] and re.fullmatch(r'20\d{2}-\d{2}-\d{2}', row['source_date']):
+        return row['source_date']
+    return None
+
+
+_STANDING_TAGS  = frozenset(["MONITORING", "DORMANT", "ON HOLD", "WATCH"])
+_STANDING_VERBS = re.compile(r'^\s*(\[[^\]]*\]\s*)*(watch|track|monitor|await)\b', re.I)
+
+
+def audit_items(conn, today, overdue_days=14, stale_days=90, dup_threshold=0.4):
+    """Return a dict of check-name → list of findings. Pure read."""
+    cur = conn.cursor()
+    closed = ",".join("?" for _ in CLOSED_TAGS)
+    cur.execute(f"""SELECT raw_id, sort_id, legacy_id, title, deadline, status_tag, status_detail,
+                           source_date, recur, depends_on, is_standing, wait_until
+                    FROM items WHERE status_tag NOT IN ({closed})""", tuple(CLOSED_TAGS))
+    rows = cur.fetchall()
+    cur.execute("SELECT raw_id, sort_id, legacy_id FROM items")
+    known = set()
+    for r in cur.fetchall():
+        for v in r:
+            if v is not None and v != '':
+                known.add(str(v))
+
+    today_iso    = today.isoformat()
+    overdue_cut  = (today - timedelta(days=overdue_days)).isoformat()
+    stale_cut    = (today - timedelta(days=stale_days)).isoformat()
+
+    def ref(r):
+        return {"id": r['raw_id'], "sort_id": r['sort_id'], "title": r['title']}
+
+    out = {k: [] for k in ("overdue_event", "overdue_open", "recurring_missed",
+                           "dangling_deps", "standing_candidates", "untouched", "near_duplicates")}
+
+    active = []
+    for r in rows:
+        snoozed = bool(r['wait_until'] and r['wait_until'] > today_iso)
+        # dependency integrity applies to every open row, standing included
+        deps = [x.strip() for x in (r['depends_on'] or '').split(',') if x.strip()]
+        missing = [d for d in deps if d not in known]
+        if missing:
+            out["dangling_deps"].append({**ref(r), "missing": missing})
+        if r['is_standing'] or snoozed:
+            continue
+        active.append(r)
+        dl = r['deadline'] or ''
+        if dl and dl < overdue_cut:
+            evt = _passed_date_in_title(r['title'], today)
+            (out["overdue_event"] if evt else out["overdue_open"]).append(
+                {**ref(r), "deadline": dl, "days_over": (today - date.fromisoformat(dl)).days})
+        rolls = (r['status_detail'] or '').count("rolled recurring deadline")
+        if r['recur'] and rolls >= 2:
+            out["recurring_missed"].append({**ref(r), "recur": r['recur'], "missed": rolls})
+        touch = _last_touch(r)
+        if not dl:
+            tagged = (r['status_tag'] or '').upper() in _STANDING_TAGS
+            verb   = bool(_STANDING_VERBS.search(r['title'] or ''))
+            if (tagged or verb) and (touch is None or touch < stale_cut):
+                out["standing_candidates"].append({**ref(r), "tag": r['status_tag'], "last_touch": touch})
+            elif touch is None or touch < stale_cut:
+                out["untouched"].append({**ref(r), "last_touch": touch})
+
+    toks = [(r, _title_tokens(r['title'])) for r in active]
+    for i in range(len(toks)):
+        for j in range(i + 1, len(toks)):
+            sim = _jaccard(toks[i][1], toks[j][1])
+            if sim >= dup_threshold:
+                out["near_duplicates"].append(
+                    {"a": ref(toks[i][0]), "b": ref(toks[j][0]), "similarity": round(sim, 2)})
+    out["near_duplicates"].sort(key=lambda d: -d["similarity"])
+    return out
+
+
+_AUDIT_HEADINGS = [
+    ("overdue_event",       "Overdue, event date in title has passed — close or reframe"),
+    ("overdue_open",        "Overdue, open-ended — reschedule or close"),
+    ("recurring_missed",    "Recurring, rolled ≥2 times without a done — still wanted?"),
+    ("dangling_deps",       "Depends on a closed or missing id — satisfied or stale; clear it"),
+    ("standing_candidates", "Monitor-shaped, no deadline, untouched — move to standing?"),
+    ("untouched",           "No deadline and no dated note — still alive?"),
+    ("near_duplicates",     "Near-duplicate titles — merge?"),
+]
+
+
+def cmd_audit(args):
+    conn  = open_db()
+    today = date.today()
+    res   = audit_items(conn, today, args.overdue_days, args.stale_days, args.dup_threshold)
+    conn.close()
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    total = sum(len(v) for v in res.values())
+    print(f"# {PROJECT_TITLE} — tracker audit ({today.isoformat()}): {total} findings")
+    print(f"thresholds: overdue >{args.overdue_days}d, untouched >{args.stale_days}d, "
+          f"title similarity ≥{args.dup_threshold}")
+    for key, heading in _AUDIT_HEADINGS:
+        items = res[key]
+        if not items:
+            continue
+        print(f"\n## {heading} ({len(items)})")
+        for it in items:
+            if key == "near_duplicates":
+                print(f"  {it['a']['id']} #{it['a']['sort_id']} ↔ {it['b']['id']} #{it['b']['sort_id']}  "
+                      f"[{it['similarity']}]\n      {it['a']['title'][:70]}\n      {it['b']['title'][:70]}")
+                continue
+            extra = ""
+            if key.startswith("overdue"):
+                extra = f"  {it['deadline']} ({it['days_over']}d)"
+            elif key == "recurring_missed":
+                extra = f"  {it['recur']} ×{it['missed']}"
+            elif key == "dangling_deps":
+                extra = f"  missing: {','.join(it['missing'])}"
+            elif key in ("standing_candidates", "untouched"):
+                extra = f"  last touch: {it['last_touch'] or 'never'}"
+                if key == "standing_candidates":
+                    extra += f"  [{it['tag']}]"
+            print(f"  {it['id']} #{it['sort_id']:<4}{extra}  {it['title'][:70]}")
+    if total == 0:
+        print("\nNothing flagged.")
+
+
 def cmd_migrate_ids(args):
     """One-time conversion of legacy numeric raw_ids to hash ids.
 
@@ -1360,6 +1546,17 @@ def build_parser():
     par = sub.add_parser("archive", help="Mark item ARCHIVED, archive it, regenerate MD")
     par.add_argument("id", metavar="ID")
 
+    # audit
+    pau = sub.add_parser("audit", help="Mechanical stale-item report: overdue, missed recurring, dangling deps, "
+                                       "standing candidates, untouched, near-duplicate titles (read-only)")
+    pau.add_argument("--overdue-days", type=int, default=14, metavar="N",
+                     help="Flag items overdue by more than N days (default 14)")
+    pau.add_argument("--stale-days", type=int, default=90, metavar="N",
+                     help="Flag undated items with no note newer than N days (default 90)")
+    pau.add_argument("--dup-threshold", type=float, default=0.4, metavar="F",
+                     help="Title token Jaccard similarity to flag as near-duplicate (default 0.4; weak signal)")
+    pau.add_argument("--json", action="store_true")
+
     # migrate-ids
     sub.add_parser("migrate-ids",
                    help="One-time: convert numeric ids to hash ids (old id kept as legacy_id; DB backed up first)")
@@ -1389,6 +1586,7 @@ def main():
         "done":    lambda a: cmd_done_archive(a, "DONE"),
         "close":   lambda a: cmd_done_archive(a, "DONE"),
         "archive": lambda a: cmd_done_archive(a, "ARCHIVED"),
+        "audit":   cmd_audit,
         "migrate-ids": cmd_migrate_ids,
         "export":  cmd_export,
     }
