@@ -528,6 +528,26 @@ class TestRecurrence(_ProjectFixture):
         new_deadline = items[0]["deadline"]
         self.assertGreater(new_deadline, date.today().isoformat())
 
+    def test_overdue_recurring_rolls_forward_on_open(self):
+        """A recurring item never marked done must not sit overdue: any open of
+        the DB advances its deadline past today and notes it in the status."""
+        self._init()
+        past = (date.today() - timedelta(days=9)).isoformat()
+        iid = self._add("--section", "active",
+                        "--title", "Weekly agenda", "--deadline", past, "--recur", "weekly")
+        r = self._run("list", "--json")
+        items = json.loads(r.stdout)
+        self.assertEqual(len(items), 1)
+        self.assertGreater(items[0]["deadline"], date.today().isoformat())
+        r2 = self._run("show", iid)
+        self.assertIn("rolled recurring deadline", r2.stdout)
+        # Standing items are left alone.
+        past2 = (date.today() - timedelta(days=9)).isoformat()
+        sid = self._add("--section", "backlog",
+                        "--title", "Standing weekly", "--deadline", past2, "--recur", "weekly")
+        r3 = self._run("show", sid)
+        self.assertNotIn("rolled recurring deadline", r3.stdout)
+
     def test_archive_does_not_respawn(self):
         self._init()
         soon = (date.today() + timedelta(days=5)).isoformat()

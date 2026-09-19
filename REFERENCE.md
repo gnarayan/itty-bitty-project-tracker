@@ -203,6 +203,11 @@ last day of the target month; priority and dependencies carry over).
 **`archive` does not respawn** — use it to permanently retire a recurring
 task. Clear with `--recur ""`.
 
+A recurring item that was **not** marked done by its deadline does not sit
+overdue: every DB open rolls its deadline forward to the next occurrence after
+today and appends a dated "rolled recurring deadline" note to its status.
+Standing items are exempt.
+
 ### Task dependencies (`--depends ID[,ID]`)
 
 Informational — does not block writes or completion. Unmet dependencies show a

@@ -352,7 +352,38 @@ def open_db():
     # so this is what preserves the never-reuse invariant for hash ids.
     conn.execute("CREATE TABLE IF NOT EXISTS issued_ids (id TEXT PRIMARY KEY)")
     conn.commit()
+    _roll_recurring(conn)
     return conn
+
+
+def _roll_recurring(conn):
+    """Advance the deadline of any recurring item whose deadline has passed.
+
+    A recurring item only respawns on `done`; one that was never marked done
+    used to sit overdue forever.  A missed weekly agenda is not backlog, so on
+    every open we roll such items forward to the next occurrence after today
+    and leave a dated note in status_detail.  Standing items are untouched.
+    """
+    today = date.today().isoformat()
+    cur = conn.cursor()
+    cur.execute("""SELECT raw_id, deadline, recur, status_detail FROM items
+                   WHERE recur IS NOT NULL AND recur != ''
+                     AND deadline IS NOT NULL AND deadline != ''
+                     AND deadline < ? AND is_standing = 0""", (today,))
+    rows = cur.fetchall()
+    if not rows:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    for r in rows:
+        try:
+            nxt = next_deadline(r['deadline'], r['recur'], today)
+        except ValueError:
+            continue
+        note = f"\n**{today}:** rolled recurring deadline {r['deadline']} → {nxt} (missed occurrence, not marked done)"
+        detail = (r['status_detail'] or '').rstrip() + note
+        conn.execute("UPDATE items SET deadline = ?, status_detail = ? WHERE raw_id = ?",
+                     (nxt, detail, r['raw_id']))
+    conn.commit()
 
 
 def _next_id(cur):
