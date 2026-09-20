@@ -1165,6 +1165,11 @@ def _passed_date_in_title(title, today):
     return min(past).isoformat() if past else None
 
 
+def _passed_event_in_status(detail, today):
+    """Month-name dates only ('June 29', 'Sep 14-16') — ISO dates in status are note timestamps."""
+    return _passed_date_in_title(re.sub(r'20\d{2}-\d{2}-\d{2}', '', detail or ''), today)
+
+
 _MONTH_FULL_OK = frozenset([
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
     "january", "february", "march", "april", "june", "july", "august", "september",
@@ -1209,7 +1214,7 @@ def audit_items(conn, today, overdue_days=14, stale_days=90, dup_threshold=0.4):
         return {"id": r['raw_id'], "sort_id": r['sort_id'], "title": r['title']}
 
     out = {k: [] for k in ("overdue_event", "overdue_open", "recurring_missed",
-                           "dangling_deps", "standing_candidates", "untouched", "near_duplicates")}
+                           "dangling_deps", "event_passed_undated", "standing_candidates", "untouched", "near_duplicates")}
 
     active = []
     for r in rows:
@@ -1232,6 +1237,9 @@ def audit_items(conn, today, overdue_days=14, stale_days=90, dup_threshold=0.4):
             out["recurring_missed"].append({**ref(r), "recur": r['recur'], "missed": rolls})
         touch = _last_touch(r)
         if not dl:
+            evt = _passed_date_in_title(r['title'], today) or _passed_event_in_status(r['status_detail'], today)
+            if evt:
+                out["event_passed_undated"].append({**ref(r), "event": evt})
             tagged = (r['status_tag'] or '').upper() in _STANDING_TAGS
             verb   = bool(_STANDING_VERBS.search(r['title'] or ''))
             if (tagged or verb) and (touch is None or touch < stale_cut):
@@ -1255,6 +1263,7 @@ _AUDIT_HEADINGS = [
     ("overdue_open",        "Overdue, open-ended — reschedule or close"),
     ("recurring_missed",    "Recurring, rolled ≥2 times without a done — still wanted?"),
     ("dangling_deps",       "Depends on a closed or missing id — satisfied or stale; clear it"),
+    ("event_passed_undated", "No deadline, but title/status names a date that has passed — dead?"),
     ("standing_candidates", "Monitor-shaped, no deadline, untouched — move to standing?"),
     ("untouched",           "No deadline and no dated note — still alive?"),
     ("near_duplicates",     "Near-duplicate titles — merge?"),
@@ -1288,6 +1297,8 @@ def cmd_audit(args):
                 extra = f"  {it['deadline']} ({it['days_over']}d)"
             elif key == "recurring_missed":
                 extra = f"  {it['recur']} ×{it['missed']}"
+            elif key == "event_passed_undated":
+                extra = f"  event {it['event']}"
             elif key == "dangling_deps":
                 extra = f"  missing: {','.join(it['missing'])}"
             elif key in ("standing_candidates", "untouched"):
