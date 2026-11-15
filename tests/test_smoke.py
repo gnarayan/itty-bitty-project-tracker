@@ -1550,6 +1550,34 @@ class TestAudit(_ProjectFixture):
         self._run("audit")
         self.assertEqual(before, (self.proj / "action_items.db").read_bytes())
 
+    def test_explicit_year_after_month_day_is_honoured(self):
+        """'Feb 11-12 2027' is a 2027 date, not this year's Feb 11."""
+        self._init()
+        today = date.today()
+        fut = self._add("--section", "active", "--title", f"Institutes meeting Jan 4–12 {today.year + 1}: attendee list")
+        old = self._add("--section", "active", "--title", f"Workshop Mar 3, {today.year - 1} follow-up")
+        res = self._audit()
+        self.assertEqual([x["id"] for x in res["event_passed_undated"]], [old])
+        self.assertEqual(res["event_passed_undated"][0]["event"], f"{today.year - 1}-03-03")
+        self.assertNotIn(fut, [x["id"] for x in res["event_passed_undated"]])
+
+    def test_yearless_date_in_status_resolves_near_its_note(self):
+        """A yearless date in a dated note means the occurrence nearest that note."""
+        self._init()
+        today = date.today()
+        note = today - timedelta(days=40)
+        ahead = today + timedelta(days=60)       # 100 d after the note: upcoming, not passed
+        behind = today - timedelta(days=50)      # 10 d before the note: passed
+        up = self._add("--section", "active", "--title", "Allocation request")
+        gone = self._add("--section", "active", "--title", "Seminar slides")
+        self._run("update", up, "--status",
+                  f"**{note.isoformat()}:** submitted; year starts {ahead.strftime('%b')} {ahead.day}")
+        self._run("update", gone, "--status",
+                  f"**{note.isoformat()}:** raised {behind.strftime('%b')} {behind.day}")
+        res = self._audit()
+        self.assertEqual([x["id"] for x in res["event_passed_undated"]], [gone])
+        self.assertEqual(res["event_passed_undated"][0]["event"], behind.isoformat())
+
 
 class TestRollupAudit(_ProjectFixture):
     def test_cross_project_audit_reports_missing_db_and_duplicate(self):

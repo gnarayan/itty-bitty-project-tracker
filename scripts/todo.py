@@ -1140,34 +1140,80 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
-def _passed_date_in_title(title, today):
-    """Earliest calendar date named in the title that is already past, or None.
+def _resolve_yearless(mon, day, ref_year, ref=None):
+    """A month/day with no year: the occurrence nearest `ref`, else in `ref_year`."""
+    if ref is None:
+        return date(ref_year, mon, day)
+    best = None
+    for y in (ref.year - 1, ref.year, ref.year + 1):
+        try:
+            d = date(y, mon, day)
+        except ValueError:
+            continue
+        if best is None or abs((d - ref).days) < abs((best - ref).days):
+            best = d
+    if best is None:
+        raise ValueError("no valid year")
+    return best
 
-    Recognises ISO dates and 'Sep 14' / 'September 14' / 'Sep 14-16' forms;
-    month-name dates without a year are assumed to be in today's year.
+
+def _dates_named(text, today, ref=None):
+    """Calendar dates named in `text`.
+
+    Recognises ISO dates and 'Sep 14' / 'September 14' / 'Sep 14-16' forms, with an
+    optional trailing year ('Feb 11-12 2027', 'Jan 4-29, 2027').  A month-name date
+    with no year is the occurrence nearest `ref` (the date the text was written);
+    without `ref` it is assumed to be in today's year.
     """
     found = []
-    for m in re.finditer(r'(20\d{2})-(\d{2})-(\d{2})', title or ''):
+    for m in re.finditer(r'(20\d{2})-(\d{2})-(\d{2})', text or ''):
         try:
             found.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
         except ValueError:
             pass
-    for m in re.finditer(r'\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*[-–/]\s*\d{1,2})?\b', title or ''):
+    for m in re.finditer(r'\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?!\d)(?:\s*[-–/]\s*\d{1,2}(?!\d))?'
+                         r'(?:,?\s+(20\d{2})\b)?', text or ''):
         word = m.group(1).lower()
         if word not in _MONTH_FULL_OK:      # rejects 'Mayor 12', 'Marlon 3' etc.
             continue
         mon = _MONTH_NUM[word[:3]]
         try:
-            found.append(date(today.year, mon, int(m.group(2))))
+            if m.group(3):
+                found.append(date(int(m.group(3)), mon, int(m.group(2))))
+            else:
+                found.append(_resolve_yearless(mon, int(m.group(2)), today.year, ref))
         except ValueError:
             pass
-    past = [d for d in found if d < today]
+    return found
+
+
+def _as_date(s):
+    try:
+        return date.fromisoformat(s) if s else None
+    except ValueError:
+        return None
+
+
+def _passed_date_in_title(title, today, ref=None):
+    """Earliest calendar date named in the title that is already past, or None."""
+    past = [d for d in _dates_named(title, today, ref) if d < today]
     return min(past).isoformat() if past else None
 
 
-def _passed_event_in_status(detail, today):
-    """Month-name dates only ('June 29', 'Sep 14-16') — ISO dates in status are note timestamps."""
-    return _passed_date_in_title(re.sub(r'20\d{2}-\d{2}-\d{2}', '', detail or ''), today)
+def _passed_event_in_status(detail, today, ref=None):
+    """Month-name dates only ('June 29', 'Sep 14-16') — ISO dates in status are note timestamps.
+
+    Each yearless date is resolved against the stamp of the note it sits in
+    (falling back to `ref`, the item's source date, before the first stamp).
+    """
+    past = []
+    parts = re.split(r'(20\d{2}-\d{2}-\d{2})', detail or '')
+    for i, chunk in enumerate(parts):
+        if i % 2:                           # an ISO stamp: becomes the reference for what follows
+            ref = _as_date(chunk) or ref
+            continue
+        past += [d for d in _dates_named(chunk, today, ref) if d < today]
+    return min(past).isoformat() if past else None
 
 
 _MONTH_FULL_OK = frozenset([
@@ -1229,7 +1275,7 @@ def audit_items(conn, today, overdue_days=14, stale_days=90, dup_threshold=0.4):
         active.append(r)
         dl = r['deadline'] or ''
         if dl and dl < overdue_cut:
-            evt = _passed_date_in_title(r['title'], today)
+            evt = _passed_date_in_title(r['title'], today, _as_date(r['source_date']))
             (out["overdue_event"] if evt else out["overdue_open"]).append(
                 {**ref(r), "deadline": dl, "days_over": (today - date.fromisoformat(dl)).days})
         rolls = (r['status_detail'] or '').count("rolled recurring deadline")
@@ -1237,7 +1283,8 @@ def audit_items(conn, today, overdue_days=14, stale_days=90, dup_threshold=0.4):
             out["recurring_missed"].append({**ref(r), "recur": r['recur'], "missed": rolls})
         touch = _last_touch(r)
         if not dl:
-            evt = _passed_date_in_title(r['title'], today) or _passed_event_in_status(r['status_detail'], today)
+            src = _as_date(r['source_date'])
+            evt = _passed_date_in_title(r['title'], today, src) or _passed_event_in_status(r['status_detail'], today, src)
             if evt:
                 out["event_passed_undated"].append({**ref(r), "event": evt})
             tagged = (r['status_tag'] or '').upper() in _STANDING_TAGS
