@@ -220,12 +220,20 @@ Read-only. Mechanical checks only; it never closes anything. Reports:
 - **recurring_missed** — recurring item rolled forward ≥2 times without a `done`.
 - **dangling_deps** — `depends_on` points at an id no longer in the DB
   (closed or never existed). Harmless to `ready`, but clear it.
+- **event_passed_undated** — no deadline, but the title or a status note names
+  a calendar date that has passed. Candidate list, not a close list.
 - **standing_candidates** — no deadline, monitor-shaped (tag MONITORING/DORMANT/
   ON HOLD or title starts watch/track/monitor/await), no dated note in N days
   (default 90).
 - **untouched** — no deadline and no dated status note in N days.
 - **near_duplicates** — title-token Jaccard ≥ F (default 0.4). Weak signal;
   real duplicates often share a topic, not title words.
+
+Date reading (both event checks): ISO dates and month-name forms (`Sep 14`,
+`Sep 14-16`). A year written after the month-day is used (`Feb 11-12 2027`).
+With no year, the date is the occurrence nearest the stamp of the status note
+it sits in (the item's source date for titles), else today's year. ISO dates
+inside status text are treated as note stamps, not events.
 
 Cross-project checks live in the hub: `python3 scripts/rollup.py --audit
 [--json]` lists registered projects with no readable DB and near-duplicate
